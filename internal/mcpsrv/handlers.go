@@ -142,7 +142,7 @@ type writeArgs struct {
 
 func (s *Server) handleWrite(ctx context.Context, req *mcp.CallToolRequest, a writeArgs) (*mcp.CallToolResult, any, error) {
 	if a.Overwrite {
-		if err := s.guard.Allow(perm.Destructive); err != nil {
+		if err := s.allow(req, perm.Destructive); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -196,7 +196,7 @@ type moveArgs struct {
 
 func (s *Server) handleMove(ctx context.Context, req *mcp.CallToolRequest, a moveArgs) (*mcp.CallToolResult, any, error) {
 	if a.Overwrite {
-		if err := s.guard.Allow(perm.Destructive); err != nil {
+		if err := s.allow(req, perm.Destructive); err != nil {
 			return nil, nil, err
 		}
 	}

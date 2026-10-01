@@ -244,3 +244,30 @@ func TestLoadPlaintextWarning(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateAuthModes(t *testing.T) {
+	base := func() *Config {
+		return &Config{Mode: "http", Host: "https://c", Permissions: PermRead, MaxListEntries: 50, MaxReadBytes: 4096,
+			AuthMode: AuthOIDC, PublicURL: "https://mcp.example.com/mcp", AccountsFile: "/x", OIDCIssuer: "https://idp.example.com"}
+	}
+	cases := map[string]struct {
+		mut     func(*Config)
+		wantErr bool
+	}{
+		"ok oidc, no static token needed": {func(*Config) {}, false},
+		"unknown mode":                    {func(c *Config) { c.AuthMode = "x" }, true},
+		"stdio rejected":                  {func(c *Config) { c.Mode = "stdio" }, true},
+		"http public url":                 {func(c *Config) { c.PublicURL = "http://mcp.example.com" }, true},
+		"loopback http ok":                {func(c *Config) { c.PublicURL = "http://localhost:8000" }, false},
+		"missing accounts file":           {func(c *Config) { c.AccountsFile = "" }, true},
+		"missing issuer":                  {func(c *Config) { c.OIDCIssuer = "" }, true},
+		"plain http issuer":               {func(c *Config) { c.OIDCIssuer = "http://idp.example.com" }, true},
+	}
+	for name, tc := range cases {
+		c := base()
+		tc.mut(c)
+		if err := c.validate(); (err != nil) != tc.wantErr {
+			t.Errorf("%s: err = %v, wantErr %v", name, err, tc.wantErr)
+		}
+	}
+}

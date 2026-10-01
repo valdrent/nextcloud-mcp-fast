@@ -25,7 +25,9 @@ Nextcloud ya expone archivos mediante WebDAV, pero no existía una forma pequeñ
 - **8 herramientas MCP**: `list_files`, `read_file`, `write_file`, `create_folder`,
   `move_file`, `delete`, `search_files`, `stat`.
 - **Dos transportes**: `stdio` (clientes locales como Claude Desktop) y
-  `streamable-http` (despliegues remotos).
+  `streamable-http` (despliegues remotos), con tres modos de autenticación para
+  HTTP: token Bearer compartido (`static`, por defecto) o tokens de acceso
+  OAuth 2.0 (`oidc` / `nextcloud`) para clientes en la nube como Claude Cowork.
 - **Seguridad por defecto**:
   - *Encierro de rutas (path jail)* — decodificación percent recursiva + normalización NFC +
     verificación léxica de contención. El recorrido (`..`, `%2e%2e` codificado o doblemente codificado, bytes NUL,
@@ -90,7 +92,7 @@ Esto garantiza que la imagen fue construida por el flujo de trabajo de lanzamien
 | `NEXTCLOUD_PASSWORD` | * | — | **App Password** (no tu contraseña de acceso) |
 | `NEXTCLOUD_MCP_TRANSPORT` | no | `stdio` | `stdio` o `http` |
 | `NEXTCLOUD_MCP_HTTP_ADDR` | no | `127.0.0.1:8000` | Dirección de escucha en modo HTTP (la imagen Docker usa `:8000`) |
-| `NEXTCLOUD_MCP_HTTP_TOKEN` | modo http | — | Token Bearer, mínimo 32 caracteres (p. ej. `openssl rand -hex 32`); los clientes envían `Authorization: Bearer <token>` |
+| `NEXTCLOUD_MCP_HTTP_TOKEN` | modo http, auth `static` | — | Token Bearer, mínimo 32 caracteres (p. ej. `openssl rand -hex 32`); los clientes envían `Authorization: Bearer <token>`. No se usa en modos OAuth |
 | `NEXTCLOUD_MCP_ALLOWED_HOSTS` | no | — | Lista blanca separada por comas de `scheme://host[:puerto]` para pass-through; `NEXTCLOUD_HOST` siempre está permitido; las entradas `http://` solo si el host por defecto es `http://` |
 | `NEXTCLOUD_MCP_PERMISSIONS` | no | `read` | `read`, `write` o `destructive` (alias `full`) |
 | `NEXTCLOUD_MCP_PASSTHROUGH` | no | `false` | Permite credenciales por solicitud (multi-cuenta); requiere modo `http`. Las credenciales solo llegan por las cabeceras `X-Nextcloud-Host`/`X-Nextcloud-Username`/`X-Nextcloud-Password` |
@@ -100,8 +102,12 @@ Esto garantiza que la imagen fue construida por el flujo de trabajo de lanzamien
 | `NEXTCLOUD_MCP_CB_THRESHOLD` | no | `10` | Llamadas fallidas dentro de la ventana antes de disparar el disyuntor (`0` lo desactiva) |
 | `NEXTCLOUD_MCP_CB_WINDOW` | no | `1m` | Duración de la ventana deslizante del disyuntor |
 | `NEXTCLOUD_MCP_LOG_LEVEL` | no | `info` | Verbosidad del registro de auditoría JSON: `debug`, `info`, `warn` o `error`; registra cada llamada de herramienta (herramienta, cuenta, rutas, resultado, duración) en stderr |
+| `NEXTCLOUD_MCP_AUTH_MODE` | no | `static` | Modo de autenticación HTTP: `static` (Bearer compartido), `oidc` o `nextcloud` (tokens de acceso OAuth 2.0; necesario para Claude Cowork/claude.ai). Los modos OAuth requieren transporte `http` y `NEXTCLOUD_MCP_PUBLIC_URL`. Ver [docs/oauth-oidc.md](docs/oauth-oidc.md) y [docs/oauth-nextcloud.md](docs/oauth-nextcloud.md) |
+| `NEXTCLOUD_MCP_PUBLIC_URL` | modos OAuth | — | URL https pública del endpoint MCP (identificador de recurso OAuth y audiencia exigida al token; http solo en loopback) |
+| `NEXTCLOUD_MCP_OIDC_ISSUER` | oidc | — | URL del emisor (issuer) del proveedor OIDC (https; http solo en loopback) |
+| `NEXTCLOUD_MCP_ACCOUNTS_FILE` | oidc | — | Archivo JSON (modo 0600) que asigna usuarios OAuth a App Passwords de Nextcloud; opcional como anulación en modo `nextcloud` |
 
-\* Obligatoria salvo que `NEXTCLOUD_MCP_PASSTHROUGH=true`.
+\* Obligatoria salvo que `NEXTCLOUD_MCP_PASSTHROUGH=true` o se use un modo de autenticación OAuth.
 
 ## Configuración del cliente MCP
 
@@ -124,6 +130,29 @@ Claude Desktop (`claude_desktop_config.json`):
 ```
 
 Para clientes remotos/streamable-HTTP, apúntalos a `http://host:8000/mcp`.
+
+### Claude Cowork / claude.ai (conector personalizado)
+
+Claude se conecta desde la nube de Anthropic y para servidores remotos solo admite
+OAuth 2.0, así que un token Bearer estático no sirve. Necesitas una URL **https**
+pública y uno de dos modos OAuth:
+
+| Modo | Servidor de autorización | Usuario → cuenta Nextcloud | Guía |
+|---|---|---|---|
+| `NEXTCLOUD_MCP_AUTH_MODE=oidc` | Tu propio IdP (Keycloak, Authentik, Auth0, Zitadel…), con DCR | `NEXTCLOUD_MCP_ACCOUNTS_FILE` (obligatorio) | [docs/oauth-oidc.md](docs/oauth-oidc.md) |
+| `NEXTCLOUD_MCP_AUTH_MODE=nextcloud` *(experimental)* | App `oauth2` de Nextcloud; client ID/secret manuales en Claude | El usuario verificado + el token actúan directamente como credenciales WebDAV (archivo de cuentas opcional) | [docs/oauth-nextcloud.md](docs/oauth-nextcloud.md) |
+
+En ambos modos el servidor es solo el *servidor de recursos*: publica los
+metadatos RFC 9728 de recurso protegido, verifica cada token de acceso (`oidc`:
+verificación local del JWT contra el JWKS del emisor; `nextcloud`: comprobación
+contra la API OCS de Nextcloud, con caché de 60 s) y asigna el usuario
+autenticado a una cuenta de Nextcloud. Los tokens se comprueban en cada
+solicitud, así que la revocación surte efecto inmediato (dentro de la caché de
+60 s en modo `nextcloud`).
+
+Después añade el conector en *Settings → Connectors → Add custom connector* con la
+URL `https://tu-dominio/mcp`. El callback OAuth a permitir es
+`https://claude.ai/api/mcp/auth_callback`.
 
 ### GitHub Copilot (cloud agent y code review)
 
@@ -202,9 +231,16 @@ Lee esto antes de ejecutar con escritura habilitada.
   importar lo que pida el LLM. Mantenlo en `read` salvo que necesites escritura específicamente.
 - **El disyuntor protege tu servidor**, no tus datos: limita una cuenta malcomportada tras
   fallos repetidos.
-- **El modo HTTP no tiene autenticación propia.** Cualquiera que alcance el endpoint
-  `/mcp` puede actuar con la cuenta configurada. Enlázalo a `127.0.0.1` (como hace el
-  archivo compose) o ponlo detrás de un reverse proxy que exija TLS y autenticación.
+- **El modo HTTP siempre exige autenticación**: un token Bearer compartido (`static`) o
+  tokens de acceso OAuth (`oidc` / `nextcloud`). Quien tenga una credencial válida actúa
+  con la cuenta asociada, así que enlázalo a `127.0.0.1` o ponlo detrás de un reverse
+  proxy que termine TLS.
+- **Los modos OAuth verifican cada token**: `oidc` comprueba firma (solo RS256/ES256),
+  emisor, caducidad y que la audiencia sea tu `NEXTCLOUD_MCP_PUBLIC_URL`; los usuarios
+  que no estén en el archivo de cuentas se deniegan y los scopes `mcp:*` solo pueden
+  bajar el nivel de permisos. El archivo de cuentas contiene App Passwords: `chmod 600`.
+  En modo `nextcloud`, el token se valida contra la API OCS de Nextcloud (caché de
+  60 s) y un token revocado deja de funcionar en menos de un minuto.
 - **Usa siempre `https://` en `NEXTCLOUD_HOST`.** Con `http://`, la App Password viaja
   en texto plano.
 - **El modo pass-through es experimental.** Permite que los clientes elijan el host y
@@ -238,7 +274,9 @@ internal/perm/           guardián read/write/destructive
 internal/breaker/        disyuntor por ventana deslizante por cuenta
 internal/webdav/         cliente WebDAV + operaciones (PROPFIND/GET/PUT/…)
 internal/accounts/       registro multi-cuenta con pool HTTP compartido
+internal/oauth/          servidor de recursos OAuth: verificación de tokens OIDC/Nextcloud, mapeo de usuarios
 internal/mcpsrv/         cableado del servidor MCP, registro de herramientas, handlers
+docs/oauth-*.md          guías de OAuth (proveedor OIDC, Nextcloud)
 docs/TESTING.md          estrategia y convenciones de pruebas
 test/e2e/                pruebas end-to-end (build tag `e2e`)
 ```

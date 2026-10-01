@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **OAuth 2.0 resource-server mode** (`NEXTCLOUD_MCP_AUTH_MODE=oidc`) so Claude
+  Cowork / claude.ai custom connectors can authenticate: RFC 9728
+  protected-resource metadata, local JWT verification (RS256/ES256, issuer,
+  audience, expiry), per-user Nextcloud App Password mapping and optional
+  `mcp:read|write|destructive` scopes that can only lower the permission level.
+  The default `static` Bearer mode is unchanged. See `docs/oauth-oidc.md`.
+- **`NEXTCLOUD_MCP_AUTH_MODE=nextcloud`** (experimental): Nextcloud's `oauth2` app
+  as authorization server (RFC 8414 metadata facade, token validation via OCS,
+  token used as WebDAV credential). See `docs/oauth-nextcloud.md`.
+
 ### Changed (BREAKING)
 
 - **HTTP mode:** `NEXTCLOUD_MCP_HTTP_TOKEN` (min 32 chars) now required, sent
