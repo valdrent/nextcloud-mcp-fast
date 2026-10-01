@@ -39,7 +39,9 @@ or gave the model unrestricted access to a server. This project aims to be:
 - **8 MCP tools**: `list_files`, `read_file`, `write_file`, `create_folder`,
   `move_file`, `delete`, `search_files`, `stat`.
 - **Two transports**: `stdio` (local clients like Claude Desktop) and
-  `streamable-http` (remote deployments).
+  `streamable-http` (remote deployments), with three auth modes for HTTP: a
+  shared Bearer token (`static`, default) or OAuth 2.0 access tokens
+  (`oidc` / `nextcloud`) for cloud clients such as Claude Cowork.
 - **Security by default**:
   - *Path jail* — recursive percent-decoding + NFC normalization + lexical
     containment check. Traversal (`..`, encoded or double-encoded `%2e%2e`,
@@ -107,7 +109,7 @@ uses GitHub's OIDC token, so no keys are stored or rotated.
 | `NEXTCLOUD_PASSWORD` | * | — | **App Password** (not your login password) |
 | `NEXTCLOUD_MCP_TRANSPORT` | no | `stdio` | `stdio` or `http` |
 | `NEXTCLOUD_MCP_HTTP_ADDR` | no | `127.0.0.1:8000` | Listen address for HTTP mode (the Docker image sets `:8000`) |
-| `NEXTCLOUD_MCP_HTTP_TOKEN` | http mode | — | Bearer token, min 32 chars (e.g. `openssl rand -hex 32`); clients send `Authorization: Bearer <token>` |
+| `NEXTCLOUD_MCP_HTTP_TOKEN` | http mode, `static` auth | — | Bearer token, min 32 chars (e.g. `openssl rand -hex 32`); clients send `Authorization: Bearer <token>`. Not used in OAuth modes |
 | `NEXTCLOUD_MCP_ALLOWED_HOSTS` | no | — | Comma-separated `scheme://host[:port]` allowlist for passthrough; the configured `NEXTCLOUD_HOST` is always allowed; `http://` entries only if the default host is `http://` |
 | `NEXTCLOUD_MCP_PERMISSIONS` | no | `read` | `read`, `write`, or `destructive` (alias `full`) |
 | `NEXTCLOUD_MCP_PASSTHROUGH` | no | `false` | Allow per-request credentials (multi-account); requires `http` mode. Credentials come only from the `X-Nextcloud-Host`/`X-Nextcloud-Username`/`X-Nextcloud-Password` headers |
@@ -117,8 +119,12 @@ uses GitHub's OIDC token, so no keys are stored or rotated.
 | `NEXTCLOUD_MCP_CB_THRESHOLD` | no | `10` | Failed calls within window before the breaker trips (`0` disables) |
 | `NEXTCLOUD_MCP_CB_WINDOW` | no | `1m` | Sliding-window duration for the breaker |
 | `NEXTCLOUD_MCP_LOG_LEVEL` | no | `info` | JSON audit log verbosity: `debug`, `info`, `warn`, or `error`; logs every tool call (tool, account, paths, outcome, duration) to stderr |
+| `NEXTCLOUD_MCP_AUTH_MODE` | no | `static` | HTTP auth mode: `static` (shared Bearer token), `oidc` or `nextcloud` (OAuth 2.0 access tokens; required by Claude Cowork/claude.ai). OAuth modes need `http` transport and `NEXTCLOUD_MCP_PUBLIC_URL`. See [docs/oauth-oidc.md](docs/oauth-oidc.md) and [docs/oauth-nextcloud.md](docs/oauth-nextcloud.md) |
+| `NEXTCLOUD_MCP_PUBLIC_URL` | oauth modes | — | Public https URL of the MCP endpoint (OAuth resource identifier and required token audience; http allowed on loopback only) |
+| `NEXTCLOUD_MCP_OIDC_ISSUER` | oidc | — | Issuer URL of the OIDC provider (https; http allowed on loopback only) |
+| `NEXTCLOUD_MCP_ACCOUNTS_FILE` | oidc | — | JSON file (mode 0600) mapping OAuth users to Nextcloud App Passwords; optional override in `nextcloud` mode |
 
-\* Required unless `NEXTCLOUD_MCP_PASSTHROUGH=true`.
+\* Required unless `NEXTCLOUD_MCP_PASSTHROUGH=true` or an OAuth auth mode is used.
 
 ## MCP client configuration
 
@@ -141,6 +147,28 @@ Claude Desktop (`claude_desktop_config.json`):
 ```
 
 For remote/streamable-HTTP clients, point them at `http://host:8000/mcp`.
+
+### Claude Cowork / claude.ai (custom connector)
+
+Claude connects from Anthropic's cloud and only supports OAuth 2.0 for remote
+servers, so a static Bearer token will not work. You need a public **https** URL
+and one of two OAuth modes:
+
+| Mode | Authorization server | User → Nextcloud account | Guide |
+|---|---|---|---|
+| `NEXTCLOUD_MCP_AUTH_MODE=oidc` | Your own IdP (Keycloak, Authentik, Auth0, Zitadel…), supports DCR | `NEXTCLOUD_MCP_ACCOUNTS_FILE` (required) | [docs/oauth-oidc.md](docs/oauth-oidc.md) |
+| `NEXTCLOUD_MCP_AUTH_MODE=nextcloud` *(experimental)* | Nextcloud's `oauth2` app; client ID/secret entered manually in Claude | The verified user + token act as WebDAV credentials directly (accounts file optional) | [docs/oauth-nextcloud.md](docs/oauth-nextcloud.md) |
+
+In both modes the server is only the *resource server*: it publishes RFC 9728
+protected-resource metadata, verifies each access token (`oidc`: local JWT
+verification against the issuer's JWKS; `nextcloud`: a check against
+Nextcloud's OCS API, cached 60 s), and maps the authenticated user to a
+Nextcloud account. Tokens are checked on every request, so revocation takes
+effect immediately (within the 60 s cache in `nextcloud` mode).
+
+Then add the connector in *Settings → Connectors → Add custom connector* with
+the URL `https://your-domain/mcp`. The OAuth callback to allow is
+`https://claude.ai/api/mcp/auth_callback`.
 
 ### GitHub Copilot cloud agent and code review
 
@@ -220,10 +248,17 @@ Read this before running with writes enabled.
   what an LLM asks. Keep it at `read` unless you specifically need writes.
 - **The circuit breaker protects your server**, not your data: it throttles a
   misbehaving account after repeated failures.
-- **HTTP mode has no built-in authentication.** Anyone who can reach the
-  `/mcp` endpoint can act with the configured account. Bind it to `127.0.0.1`
-  (as the compose file does) or put it behind a reverse proxy that enforces
-  TLS and authentication.
+- **HTTP mode always requires authentication**: a shared Bearer token
+  (`static`) or OAuth access tokens (`oidc` / `nextcloud`). Anyone holding a
+  valid credential can act with the mapped account, so bind to `127.0.0.1` or
+  put the server behind a reverse proxy that terminates TLS.
+- **OAuth modes verify every token locally or against Nextcloud**: `oidc`
+  checks signature (RS256/ES256 only), issuer, expiry and that the audience is
+  your `NEXTCLOUD_MCP_PUBLIC_URL`; users not present in the accounts file are
+  denied, and `mcp:*` scopes can only lower the permission level. The accounts
+  file holds App Passwords and must be `chmod 600`. In `nextcloud` mode the
+  token is validated against Nextcloud's OCS API (cached 60 s) and a revoked
+  token stops working within a minute.
 - **Always use `https://` for `NEXTCLOUD_HOST`.** With `http://`, the App
   Password travels in clear text.
 - **Pass-through mode is experimental.** It lets clients choose the Nextcloud
@@ -257,7 +292,9 @@ internal/perm/           read/write/destructive guard
 internal/breaker/        sliding-window circuit breaker per account
 internal/webdav/         WebDAV client + operations (PROPFIND/GET/PUT/…)
 internal/accounts/       multi-account registry with shared HTTP pool
+internal/oauth/          OAuth resource server: OIDC/Nextcloud token verification, user mapping
 internal/mcpsrv/         MCP server wiring, tool registration, handlers
+docs/oauth-*.md          OAuth setup guides (OIDC provider, Nextcloud)
 docs/TESTING.md          testing strategy and conventions
 test/e2e/                end-to-end tests (build tag `e2e`)
 ```

@@ -19,11 +19,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/valdrent/nextcloud-mcp-fast/internal/accounts"
 	"github.com/valdrent/nextcloud-mcp-fast/internal/config"
 	"github.com/valdrent/nextcloud-mcp-fast/internal/mcpsrv"
+	"github.com/valdrent/nextcloud-mcp-fast/internal/oauth"
 )
 
 // version is overridden at build time with -ldflags "-X main.version=v1.0.0".
@@ -48,6 +50,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("init: %v", err)
 	}
+	if cfg.OAuth() && cfg.AccountsFile != "" {
+		users, err := oauth.LoadUserMap(cfg.AccountsFile)
+		if err != nil {
+			log.Fatalf("accounts: %v", err)
+		}
+		srv.SetUserMap(users)
+	}
 	mcpServer := srv.BuildMCP()
 
 	switch cfg.Mode {
@@ -71,12 +80,31 @@ func runStdio(s *mcp.Server) {
 // buildHTTPHandler constructs the HTTP handler stack for the MCP server.
 // It is separated from runHTTP for testability.
 func buildHTTPHandler(s *mcp.Server, token string) http.Handler {
-	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, &mcp.StreamableHTTPOptions{
+	return buildMux(s, requireBearer(token, mcpHandler(s)), nil)
+}
+
+// buildOAuthHandler is like buildHTTPHandler but authenticates with OAuth
+// access tokens and serves the RFC 9728 protected-resource metadata.
+func buildOAuthHandler(s *mcp.Server, cfg *config.Config, verify auth.TokenVerifier, authServers []string) http.Handler {
+	mux := http.NewServeMux()
+	protect := oauth.Protect(mux, cfg.PublicURL, authServers, verify)
+	if cfg.AuthMode == config.AuthNextcloud {
+		mux.Handle("/.well-known/oauth-authorization-server", oauth.AuthServerMetadata(authServers[0], cfg.Host))
+	}
+	return buildMux(s, protect(mcpHandler(s)), mux)
+}
+
+func mcpHandler(s *mcp.Server) http.Handler {
+	return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, &mcp.StreamableHTTPOptions{
 		Stateless: true,
 	})
+}
 
-	mux := http.NewServeMux()
-	mux.Handle("/", requireBearer(token, handler))
+func buildMux(_ *mcp.Server, protected http.Handler, mux *http.ServeMux) http.Handler {
+	if mux == nil {
+		mux = http.NewServeMux()
+	}
+	mux.Handle("/", protected)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"status":"ok","version":"` + version + `"}`))
@@ -99,7 +127,18 @@ func buildHTTPServer(addr string, handler http.Handler) *http.Server {
 }
 
 func runHTTP(s *mcp.Server, cfg *config.Config) {
-	handler := buildHTTPHandler(s, cfg.HTTPToken)
+	var handler http.Handler
+	switch cfg.AuthMode {
+	case config.AuthOIDC:
+		v := oauth.NewOIDCVerifier(cfg.OIDCIssuer, cfg.PublicURL, nil)
+		handler = buildOAuthHandler(s, cfg, v.Verify, []string{cfg.OIDCIssuer})
+	case config.AuthNextcloud:
+		v := oauth.NewNextcloudVerifier(cfg.Host, nil)
+		issuer := oauth.Origin(cfg.PublicURL)
+		handler = buildOAuthHandler(s, cfg, v.Verify, []string{issuer})
+	default:
+		handler = buildHTTPHandler(s, cfg.HTTPToken)
+	}
 	httpServer := buildHTTPServer(cfg.HTTPAddr, handler)
 
 	go func() {

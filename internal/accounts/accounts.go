@@ -95,7 +95,7 @@ func (r *Registry) Resolve(ctx context.Context, host, user, pass string) (*webda
 	cfg := r.cfg
 
 	// Single-user mode: ignore per-request credentials.
-	if !cfg.AllowPassthrough {
+	if !cfg.PerRequestCreds() {
 		host, user, pass = cfg.Host, cfg.Username, cfg.Password
 	}
 
@@ -104,7 +104,7 @@ func (r *Registry) Resolve(ctx context.Context, host, user, pass string) (*webda
 	}
 	host = trimHost(host)
 
-	if cfg.AllowPassthrough && !cfg.HostAllowed(host) {
+	if cfg.PerRequestCreds() && !cfg.HostAllowed(host) {
 		return nil, ncerr.New(ncerr.CodeForbidden, "host %s is not in the allowed list (NEXTCLOUD_MCP_ALLOWED_HOSTS)", host)
 	}
 
@@ -146,7 +146,7 @@ func (r *Registry) resolveOnce(ctx context.Context, id, host, user, pass string)
 		return nil, err
 	}
 
-	if r.cfg.AllowPassthrough {
+	if r.cfg.PerRequestCreds() {
 		if err := client.AuthCheck(ctx); err != nil {
 			if ncerr.Is(err, ncerr.CodeUnauthorized) {
 				r.failed.Add(id, err)

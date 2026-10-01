@@ -75,9 +75,35 @@ type Config struct {
 	// (default info). Writes are logged at info, reads at debug.
 	LogLevel string
 
+	// AuthMode selects how HTTP clients authenticate: "static" (shared Bearer
+	// token, default), "oidc" (JWT access tokens from an external OIDC
+	// provider) or "nextcloud" (Nextcloud as OAuth authorization server).
+	AuthMode string
+	// PublicURL is the externally reachable https URL of the MCP endpoint. It
+	// is the OAuth resource identifier and the expected token audience.
+	PublicURL string
+	// AccountsFile maps OAuth users (token subject) to Nextcloud credentials.
+	AccountsFile string
+	// OIDCIssuer is the issuer URL of the OIDC provider (oidc mode).
+	OIDCIssuer string
+
 	// Version is set by main from build info; used in logs and /healthz.
 	Version string
 }
+
+// Auth modes for HTTP transport.
+const (
+	AuthStatic    = "static"
+	AuthOIDC      = "oidc"
+	AuthNextcloud = "nextcloud"
+)
+
+// OAuth reports whether HTTP clients authenticate with OAuth access tokens.
+func (c *Config) OAuth() bool { return c.AuthMode == AuthOIDC || c.AuthMode == AuthNextcloud }
+
+// PerRequestCreds reports whether Nextcloud credentials are chosen per request
+// (header pass-through or OAuth user mapping) instead of the configured default.
+func (c *Config) PerRequestCreds() bool { return c.AllowPassthrough || c.OAuth() }
 
 // Load reads configuration from environment variables (with NEXTCLOUD_ prefix)
 // and validates it. It returns an error describing the first problem found.
@@ -99,6 +125,10 @@ func Load() (*Config, error) {
 		CircuitBreakerThreshold: ep.envInt("NEXTCLOUD_MCP_CB_THRESHOLD", 10),
 		CircuitBreakerWindow:    ep.envDuration("NEXTCLOUD_MCP_CB_WINDOW", time.Minute),
 		LogLevel:                strings.ToLower(envStr("NEXTCLOUD_MCP_LOG_LEVEL", "info")),
+		AuthMode:                strings.ToLower(envStr("NEXTCLOUD_MCP_AUTH_MODE", AuthStatic)),
+		PublicURL:               strings.TrimRight(envStr("NEXTCLOUD_MCP_PUBLIC_URL", ""), "/"),
+		AccountsFile:            envStr("NEXTCLOUD_MCP_ACCOUNTS_FILE", ""),
+		OIDCIssuer:              strings.TrimRight(envStr("NEXTCLOUD_MCP_OIDC_ISSUER", ""), "/"),
 	}
 
 	if ep.err != nil {
@@ -154,15 +184,19 @@ func (c *Config) validate() error {
 		return fmt.Errorf("NEXTCLOUD_MCP_LOG_LEVEL must be one of debug, info, warn, error, got %q", c.LogLevel)
 	}
 
-	// Single-user mode requires credentials unless passthrough is enabled.
-	if !c.AllowPassthrough && (c.Username == "" || c.Password == "") {
+	if err := c.validateAuth(); err != nil {
+		return err
+	}
+
+	// Single-user mode requires credentials unless passthrough or OAuth user mapping is enabled.
+	if !c.PerRequestCreds() && (c.Username == "" || c.Password == "") {
 		return fmt.Errorf("NEXTCLOUD_USERNAME and NEXTCLOUD_PASSWORD are required (use a Nextcloud App Password), or enable NEXTCLOUD_MCP_PASSTHROUGH=true for multi-account pass-through")
 	}
 
-	if c.Mode == "http" && c.HTTPToken == "" {
+	if c.Mode == "http" && c.AuthMode == AuthStatic && c.HTTPToken == "" {
 		return fmt.Errorf("NEXTCLOUD_MCP_HTTP_TOKEN is required when NEXTCLOUD_MCP_TRANSPORT=http (the endpoint must never run unauthenticated)")
 	}
-	if c.Mode == "http" && len(c.HTTPToken) < MinHTTPTokenLen {
+	if c.Mode == "http" && c.AuthMode == AuthStatic && len(c.HTTPToken) < MinHTTPTokenLen {
 		return fmt.Errorf("NEXTCLOUD_MCP_HTTP_TOKEN must be at least %d characters (generate one with: openssl rand -hex 32)", MinHTTPTokenLen)
 	}
 	if c.Mode == "stdio" && c.AllowPassthrough {
@@ -170,6 +204,58 @@ func (c *Config) validate() error {
 	}
 
 	return nil
+}
+
+func (c *Config) validateAuth() error {
+	if c.AuthMode == "" {
+		c.AuthMode = AuthStatic
+	}
+	switch c.AuthMode {
+	case AuthStatic:
+		return nil
+	case AuthOIDC, AuthNextcloud:
+	default:
+		return fmt.Errorf("NEXTCLOUD_MCP_AUTH_MODE must be one of static, oidc, nextcloud, got %q", c.AuthMode)
+	}
+	if c.Mode != "http" {
+		return fmt.Errorf("NEXTCLOUD_MCP_AUTH_MODE=%s requires NEXTCLOUD_MCP_TRANSPORT=http", c.AuthMode)
+	}
+	u, err := url.Parse(c.PublicURL)
+	if err != nil || u.Host == "" || u.Fragment != "" || u.RawQuery != "" {
+		return fmt.Errorf("NEXTCLOUD_MCP_PUBLIC_URL must be an absolute URL without query or fragment, got %q", c.PublicURL)
+	}
+	if u.Scheme != "https" && !(u.Scheme == "http" && isLoopback(u.Hostname())) {
+		return fmt.Errorf("NEXTCLOUD_MCP_PUBLIC_URL must be https (http only on loopback), got %q", c.PublicURL)
+	}
+	if c.AccountsFile == "" && c.AuthMode == AuthOIDC {
+		return fmt.Errorf("NEXTCLOUD_MCP_ACCOUNTS_FILE is required when NEXTCLOUD_MCP_AUTH_MODE=%s", c.AuthMode)
+	}
+	if c.AuthMode == AuthNextcloud && strings.HasPrefix(c.Host, "http://") && !isLoopback(hostOf(c.Host)) {
+		return fmt.Errorf("NEXTCLOUD_HOST must be https when NEXTCLOUD_MCP_AUTH_MODE=nextcloud")
+	}
+	if c.AuthMode == AuthOIDC {
+		iu, err := url.Parse(c.OIDCIssuer)
+		if err != nil || iu.Host == "" || (iu.Scheme != "https" && !(iu.Scheme == "http" && isLoopback(iu.Hostname()))) {
+			return fmt.Errorf("NEXTCLOUD_MCP_OIDC_ISSUER must be an https URL (http only on loopback), got %q", c.OIDCIssuer)
+		}
+	}
+	return nil
+}
+
+func hostOf(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
+}
+
+func isLoopback(h string) bool {
+	if h == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
 }
 
 // HostAllowed reports whether host (already normalized to scheme://host[:port])
