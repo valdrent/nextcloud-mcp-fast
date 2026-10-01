@@ -141,26 +141,7 @@ func (s *Server) resolveClient(ctx context.Context, req *mcp.CallToolRequest, ex
 // password it saw in another context.
 func (s *Server) credsFor(req *mcp.CallToolRequest, _ map[string]any) (host, user, pass string) {
 	if s.cfg.OAuth() {
-		// The account comes from the verified token, never from headers or
-		// arguments. Unmapped users get empty credentials and are denied.
-		if req != nil && req.GetExtra() != nil {
-			ti := req.GetExtra().TokenInfo
-			if a, ok := s.users.Lookup(ti); ok {
-				h := a.Host
-				if h == "" {
-					h = s.cfg.Host
-				}
-				return h, a.Username, a.AppPassword
-			}
-			// Nextcloud-issued tokens are app tokens: they authenticate the
-			// verified user against the fixed host as the Basic-auth password.
-			if s.cfg.AuthMode == config.AuthNextcloud && ti != nil {
-				if tok, _ := ti.Extra["token"].(string); tok != "" && ti.UserID != "" {
-					return s.cfg.Host, ti.UserID, tok
-				}
-			}
-		}
-		return "", "", ""
+		return s.oauthCreds(req)
 	}
 	if !s.cfg.AllowPassthrough {
 		return s.cfg.Host, s.cfg.Username, s.cfg.Password
@@ -170,8 +151,31 @@ func (s *Server) credsFor(req *mcp.CallToolRequest, _ map[string]any) (host, use
 	if req != nil && req.GetExtra() != nil {
 		h = req.GetExtra().Header
 	}
-	host, user, pass = credFromHeaders(h)
-	return host, user, pass
+	return credFromHeaders(h)
+}
+
+// oauthCreds resolves the account from the verified token, never from headers
+// or arguments. Unmapped users get empty credentials and are denied.
+func (s *Server) oauthCreds(req *mcp.CallToolRequest) (host, user, pass string) {
+	if req == nil || req.GetExtra() == nil {
+		return "", "", ""
+	}
+	ti := req.GetExtra().TokenInfo
+	if a, ok := s.users.Lookup(ti); ok {
+		h := a.Host
+		if h == "" {
+			h = s.cfg.Host
+		}
+		return h, a.Username, a.AppPassword
+	}
+	// Nextcloud-issued tokens are app tokens: they authenticate the
+	// verified user against the fixed host as the Basic-auth password.
+	if s.cfg.AuthMode == config.AuthNextcloud && ti != nil {
+		if tok, _ := ti.Extra["token"].(string); tok != "" && ti.UserID != "" {
+			return s.cfg.Host, ti.UserID, tok
+		}
+	}
+	return "", "", ""
 }
 
 // breakerKey derives the per-account circuit-breaker key from the same
@@ -192,21 +196,31 @@ func (s *Server) allow(req *mcp.CallToolRequest, op perm.Level) error {
 	if s.cfg.AuthMode != config.AuthOIDC {
 		return nil // nextcloud tokens carry no scopes; the configured level is the ceiling
 	}
-	granted := perm.Read
+	var scopes []string
 	if req != nil && req.GetExtra() != nil && req.GetExtra().TokenInfo != nil {
-		for _, sc := range req.GetExtra().TokenInfo.Scopes {
-			switch sc {
-			case "mcp:write":
-				granted = max(granted, perm.Write)
-			case "mcp:destructive":
-				granted = max(granted, perm.Destructive)
-			}
-		}
+		scopes = req.GetExtra().TokenInfo.Scopes
 	}
-	if granted < op {
+	if grantedLevel(scopes) < op {
 		return ncerr.New(ncerr.CodePermissionDenied, "the access token does not grant this operation; request the mcp:write or mcp:destructive scope")
 	}
 	return nil
+}
+
+// grantedLevel maps the mcp:* scopes of a token to the highest permission
+// level they grant. Without any mcp:* scope the token is read-only.
+func grantedLevel(scopes []string) perm.Level {
+	granted := perm.Read
+	for _, sc := range scopes {
+		switch sc {
+		case "mcp:write":
+			granted = max(granted, perm.Write)
+		case "mcp:destructive":
+			granted = max(granted, perm.Destructive)
+		default:
+			// Other scopes (openid, profile, ...) grant nothing.
+		}
+	}
+	return granted
 }
 
 // guardAndBreaker runs the permission check and breaker for an operation.
@@ -241,8 +255,9 @@ func countsAgainstBreaker(err error) bool {
 	switch se.Code {
 	case ncerr.CodeServerError, ncerr.CodeTimeout, ncerr.CodeRateLimited, ncerr.CodeUnauthorized:
 		return true
+	default:
+		return false
 	}
-	return false
 }
 
 // run is the common prologue for every handler: permission + breaker check,
@@ -292,6 +307,8 @@ func instructions(cfg *config.Config) string {
 		b.WriteString("The Nextcloud account is determined by the authenticated OAuth user; no credentials are needed in tool arguments. ")
 	} else if cfg.AllowPassthrough {
 		b.WriteString("Multi-account pass-through is enabled: the transport layer selects the account per request (via X-Nextcloud-* headers); no credentials are needed in tool arguments. ")
+	} else {
+		b.WriteString("The Nextcloud account is fixed by the server configuration. ")
 	}
 	return b.String()
 }

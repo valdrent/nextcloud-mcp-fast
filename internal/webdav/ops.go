@@ -68,7 +68,7 @@ type resourceType struct {
 	IsCollection bool
 }
 
-func (rt *resourceType) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+func (rt *resourceType) UnmarshalXML(d *xml.Decoder, _ xml.StartElement) error {
 	for {
 		tok, err := d.Token()
 		if err != nil {
@@ -79,23 +79,34 @@ func (rt *resourceType) UnmarshalXML(d *xml.Decoder, start xml.StartElement) err
 			if t.Name.Local == "collection" {
 				rt.IsCollection = true
 			}
-			depth := 1
-			for depth > 0 {
-				tok, err := d.Token()
-				if err != nil {
-					return err
-				}
-				switch tok.(type) {
-				case xml.StartElement:
-					depth++
-				case xml.EndElement:
-					depth--
-				}
+			if err := skipSubtree(d); err != nil {
+				return err
 			}
 		case xml.EndElement:
 			return nil
+		default:
+			// Character data and comments carry no resource type.
 		}
 	}
+}
+
+// skipSubtree consumes tokens up to the end of the element just opened.
+func skipSubtree(d *xml.Decoder) error {
+	for depth := 1; depth > 0; {
+		tok, err := d.Token()
+		if err != nil {
+			return err
+		}
+		switch tok.(type) {
+		case xml.StartElement:
+			depth++
+		case xml.EndElement:
+			depth--
+		default:
+			// Text and comments do not change nesting.
+		}
+	}
+	return nil
 }
 
 // props returns the property name/body pairs for a response.
@@ -120,18 +131,8 @@ func (e *propEntry) props() []struct {
 	return out
 }
 
-// List performs a single PROPFIND (depth 1) on relDir and returns the page of
-// entries starting at offset, capped at limit. When the folder has more
-// entries than offset+limit, Next is set so callers can keep paging. Exactly
-// one PROPFIND is issued per call: whether a next page exists is decided by
-// scanning the same response for one more valid entry past the page.
-func (c *Client) List(ctx context.Context, relDir string, offset, limit int) (*ListResult, error) {
-	if limit <= 0 || limit > 200 {
-		limit = 200
-	}
-	if offset < 0 {
-		offset = 0
-	}
+// propfindDir issues the depth-1 PROPFIND for relDir and decodes the response.
+func (c *Client) propfindDir(ctx context.Context, relDir string) (*propResponse, error) {
 	resp, err := c.do(ctx, "PROPFIND", c.URL(relDir), http.Header{
 		"Depth":        {"1"},
 		"Content-Type": {"application/xml; charset=utf-8"},
@@ -148,6 +149,25 @@ func (c *Client) List(ctx context.Context, relDir string, offset, limit int) (*L
 	var pr propResponse
 	if err := xml.NewDecoder(resp.Body).Decode(&pr); err != nil {
 		return nil, fmt.Errorf("decoding PROPFIND response: %w", err)
+	}
+	return &pr, nil
+}
+
+// List performs a single PROPFIND (depth 1) on relDir and returns the page of
+// entries starting at offset, capped at limit. When the folder has more
+// entries than offset+limit, Next is set so callers can keep paging. Exactly
+// one PROPFIND is issued per call: whether a next page exists is decided by
+// scanning the same response for one more valid entry past the page.
+func (c *Client) List(ctx context.Context, relDir string, offset, limit int) (*ListResult, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 200
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	pr, err := c.propfindDir(ctx, relDir)
+	if err != nil {
+		return nil, err
 	}
 
 	dir := normalizeDir(relDir)
@@ -171,19 +191,7 @@ func (c *Client) List(ctx context.Context, relDir string, offset, limit int) (*L
 			out.Next = strconv.Itoa(offset + limit)
 			break
 		}
-		e := Entry{Path: rel, Name: baseName(rel)}
-		for _, p := range r.props() {
-			switch p.Name {
-			case "resourcetype":
-				e.IsDir = strings.Contains(p.Body, "collection")
-			case "getcontentlength":
-				e.Size, _ = strconv.ParseInt(p.Body, 10, 64)
-			case "getlastmodified":
-				e.Modified = p.Body
-			case "getcontenttype":
-				e.ContentType = p.Body
-			}
-		}
+		e := r.entry(rel)
 		out.Entries = append(out.Entries, e)
 	}
 
@@ -346,19 +354,7 @@ func (c *Client) Stat(ctx context.Context, relPath string) (*Entry, error) {
 		if !ok {
 			continue
 		}
-		e := Entry{Path: rel, Name: baseName(rel)}
-		for _, p := range r.props() {
-			switch p.Name {
-			case "resourcetype":
-				e.IsDir = strings.Contains(p.Body, "collection")
-			case "getcontentlength":
-				e.Size, _ = strconv.ParseInt(p.Body, 10, 64)
-			case "getlastmodified":
-				e.Modified = p.Body
-			case "getcontenttype":
-				e.ContentType = p.Body
-			}
-		}
+		e := r.entry(rel)
 		return &e, nil
 	}
 	return nil, ncerr.New(ncerr.CodeNotFound, "no response for %s", relPath)

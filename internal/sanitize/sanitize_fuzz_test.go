@@ -75,32 +75,28 @@ func FuzzSanitize(f *testing.F) {
 
 		// When Sanitize returns no error, check invariants
 
-		// 1. Result must start with "/"
-		if !strings.HasPrefix(result, "/") {
-			t.Errorf("result does not start with /: %q", result)
-		}
-
-		// 2. Result must equal path.Clean(result)
-		if path.Clean(result) != result {
-			t.Errorf("result != path.Clean(result): %q != %q", result, path.Clean(result))
-		}
-
-		// 3. Result must not contain ".." as a segment
-		segments := strings.Split(strings.TrimPrefix(result, "/"), "/")
-		for _, seg := range segments {
-			if seg == ".." {
-				t.Errorf("result contains .. segment: %q", result)
-			}
-		}
-
-		// 4. Result must not contain NUL byte
-		if strings.ContainsRune(result, 0) {
-			t.Errorf("result contains NUL byte: %q", result)
-		}
-
-		// 5. Result must be valid UTF-8
-		if !utf8.ValidString(result) {
-			t.Errorf("result is not valid UTF-8: %q", result)
-		}
+		checkInvariants(t, result)
 	})
+}
+
+// checkInvariants asserts the documented guarantees of a successful Sanitize.
+func checkInvariants(t *testing.T, result string) {
+	t.Helper()
+	if !strings.HasPrefix(result, "/") {
+		t.Errorf("result does not start with /: %q", result)
+	}
+	if path.Clean(result) != result {
+		t.Errorf("result != path.Clean(result): %q != %q", result, path.Clean(result))
+	}
+	for _, seg := range strings.Split(strings.TrimPrefix(result, "/"), "/") {
+		if seg == ".." {
+			t.Errorf("result contains .. segment: %q", result)
+		}
+	}
+	if strings.ContainsRune(result, 0) {
+		t.Errorf("result contains NUL byte: %q", result)
+	}
+	if !utf8.ValidString(result) {
+		t.Errorf("result is not valid UTF-8: %q", result)
+	}
 }

@@ -42,7 +42,7 @@ func propfindMock(n int) *httptest.Server {
 			http.Error(w, "unexpected "+r.Method, http.StatusMethodNotAllowed)
 			return
 		}
-		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+		w.Header().Set(hdrContentType, xmlContentType)
 		w.WriteHeader(http.StatusMultiStatus)
 		fmt.Fprint(w, body)
 	}))
@@ -54,7 +54,7 @@ func TestListTotalAndPagination(t *testing.T) {
 
 	c, err := NewClient(&Credentials{Host: ts.URL, Username: "alice", Password: "p"}, &http.Client{})
 	if err != nil {
-		t.Fatalf("NewClient: %v", err)
+		t.Fatalf(errNewClientFmt, err)
 	}
 
 	res, err := c.List(context.Background(), "/docs", 0, 200)
@@ -119,7 +119,7 @@ func TestListLimitClampedTo200(t *testing.T) {
 
 	c, err := NewClient(&Credentials{Host: ts.URL, Username: "alice", Password: "p"}, &http.Client{})
 	if err != nil {
-		t.Fatalf("NewClient: %v", err)
+		t.Fatalf(errNewClientFmt, err)
 	}
 	// A limit above 200 must clamp to 200, not collapse to the default.
 	res, err := c.List(context.Background(), "/docs", 0, 500)
@@ -136,7 +136,7 @@ func TestMakeDirExistingFolderIsConflict(t *testing.T) {
 		if r.Method != "MKCOL" {
 			t.Errorf("method = %s, want MKCOL", r.Method)
 		}
-		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+		w.Header().Set(hdrContentType, xmlContentType)
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		fmt.Fprint(w, `<?xml version="1.0"?>
 <d:error xmlns:d="DAV:" xmlns:s="http://sabredav.org/ns">
@@ -148,7 +148,7 @@ func TestMakeDirExistingFolderIsConflict(t *testing.T) {
 
 	c, err := NewClient(&Credentials{Host: ts.URL, Username: "alice", Password: "p"}, &http.Client{})
 	if err != nil {
-		t.Fatalf("NewClient: %v", err)
+		t.Fatalf(errNewClientFmt, err)
 	}
 	err = c.MakeDir(context.Background(), "/docs")
 	if !ncerr.Is(err, ncerr.CodeConflict) {
@@ -164,7 +164,7 @@ func TestMoveNoOverwriteExistingDestIsConflict(t *testing.T) {
 		if got := r.Header.Get("Overwrite"); got != "F" {
 			t.Errorf("Overwrite header = %q, want F", got)
 		}
-		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+		w.Header().Set(hdrContentType, xmlContentType)
 		w.WriteHeader(http.StatusPreconditionFailed)
 		fmt.Fprint(w, `<?xml version="1.0"?>
 <d:error xmlns:d="DAV:" xmlns:s="http://sabredav.org/ns">
@@ -176,7 +176,7 @@ func TestMoveNoOverwriteExistingDestIsConflict(t *testing.T) {
 
 	c, err := NewClient(&Credentials{Host: ts.URL, Username: "alice", Password: "p"}, &http.Client{})
 	if err != nil {
-		t.Fatalf("NewClient: %v", err)
+		t.Fatalf(errNewClientFmt, err)
 	}
 	err = c.Move(context.Background(), "/docs/a.txt", "/docs/b.txt", false)
 	if !ncerr.Is(err, ncerr.CodeConflict) {
@@ -189,7 +189,7 @@ func TestStatNotFound(t *testing.T) {
 		if r.Method != "PROPFIND" {
 			t.Errorf("method = %s, want PROPFIND", r.Method)
 		}
-		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+		w.Header().Set(hdrContentType, xmlContentType)
 		w.WriteHeader(http.StatusNotFound)
 		fmt.Fprint(w, `<?xml version="1.0"?>
 <d:error xmlns:d="DAV:" xmlns:s="http://sabredav.org/ns">
@@ -201,7 +201,7 @@ func TestStatNotFound(t *testing.T) {
 
 	c, err := NewClient(&Credentials{Host: ts.URL, Username: "alice", Password: "p"}, &http.Client{})
 	if err != nil {
-		t.Fatalf("NewClient: %v", err)
+		t.Fatalf(errNewClientFmt, err)
 	}
 	_, err = c.Stat(context.Background(), "/nope")
 	if !ncerr.Is(err, ncerr.CodeNotFound) {
@@ -220,10 +220,17 @@ func TestDeleteMissingIsNotFound(t *testing.T) {
 
 	c, err := NewClient(&Credentials{Host: ts.URL, Username: "alice", Password: "p"}, &http.Client{})
 	if err != nil {
-		t.Fatalf("NewClient: %v", err)
+		t.Fatalf(errNewClientFmt, err)
 	}
 	err = c.Delete(context.Background(), "/nope")
 	if !ncerr.Is(err, ncerr.CodeNotFound) {
 		t.Errorf("Delete(missing) error = %v, want code not_found", err)
 	}
 }
+
+const (
+	hdrContentType = "Content-Type"
+	xmlContentType = "application/xml; charset=utf-8"
+)
+
+const errNewClientFmt = "NewClient: %v"

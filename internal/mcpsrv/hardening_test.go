@@ -91,31 +91,31 @@ func TestOverwriteRules(t *testing.T) {
 
 	cs, done := newFullTestServer(t, ts.URL, "write")
 	defer done()
-	if text, isErr := callText(t, cs, "write_file", map[string]any{"path": "/f.txt", "content": "one"}); isErr {
+	if text, isErr := callText(t, cs, "write_file", map[string]any{"path": rootFilePath, "content": "one"}); isErr {
 		t.Fatalf("first write: %s", text)
 	}
-	text, isErr := callText(t, cs, "write_file", map[string]any{"path": "/f.txt", "content": "two"})
+	text, isErr := callText(t, cs, "write_file", map[string]any{"path": rootFilePath, "content": "two"})
 	if !isErr || !strings.Contains(text, "conflict") || !strings.Contains(text, "overwrite=true") {
 		t.Errorf("second write should conflict with hint, got %q", text)
 	}
-	text, isErr = callText(t, cs, "write_file", map[string]any{"path": "/f.txt", "content": "two", "overwrite": true})
+	text, isErr = callText(t, cs, "write_file", map[string]any{"path": rootFilePath, "content": "two", "overwrite": true})
 	if !isErr || !strings.Contains(text, "permission_denied") {
 		t.Errorf("overwrite at write level should be denied, got %q", text)
 	}
-	text, isErr = callText(t, cs, "move_file", map[string]any{"from": "/f.txt", "to": "/g.txt", "overwrite": true})
+	text, isErr = callText(t, cs, "move_file", map[string]any{"from": rootFilePath, "to": "/g.txt", "overwrite": true})
 	if !isErr || !strings.Contains(text, "permission_denied") {
 		t.Errorf("move overwrite at write level should be denied, got %q", text)
 	}
-	if m.files["/remote.php/dav/files/alice/f.txt"] != "one" {
-		t.Errorf("file was modified: %q", m.files["/remote.php/dav/files/alice/f.txt"])
+	if m.files[aliceFilePath] != "one" {
+		t.Errorf("file was modified: %q", m.files[aliceFilePath])
 	}
 
 	cs2, done2 := newFullTestServer(t, ts.URL, "destructive")
 	defer done2()
-	if text, isErr := callText(t, cs2, "write_file", map[string]any{"path": "/f.txt", "content": "two", "overwrite": true}); isErr {
+	if text, isErr := callText(t, cs2, "write_file", map[string]any{"path": rootFilePath, "content": "two", "overwrite": true}); isErr {
 		t.Fatalf("overwrite as destructive: %s", text)
 	}
-	if m.files["/remote.php/dav/files/alice/f.txt"] != "two" {
+	if m.files[aliceFilePath] != "two" {
 		t.Errorf("overwrite did not apply")
 	}
 }
@@ -132,15 +132,15 @@ func TestAuditLog(t *testing.T) {
 	cs := connect(t, &config.Config{Mode: "stdio", Host: ts.URL, Username: "alice", Password: secret,
 		Permissions: "write"}, logger)
 
-	callText(t, cs, "write_file", map[string]any{"path": "/audit.txt", "content": "hi"})
-	callText(t, cs, "write_file", map[string]any{"path": "/audit.txt", "content": "hi"}) // conflict
-	callText(t, cs, "stat", map[string]any{"path": "/audit.txt"})                        // debug: not logged
+	callText(t, cs, "write_file", map[string]any{"path": auditFilePath, "content": "hi"})
+	callText(t, cs, "write_file", map[string]any{"path": auditFilePath, "content": "hi"}) // conflict
+	callText(t, cs, "stat", map[string]any{"path": auditFilePath})                        // debug: not logged
 
 	out := buf.String()
 	if strings.Contains(out, secret) {
 		t.Fatalf("password leaked into audit log:\n%s", out)
 	}
-	for _, want := range []string{`"tool":"write_file"`, `"path":"/audit.txt"`, `"outcome":"ok"`,
+	for _, want := range []string{`"tool":"write_file"`, `"path":"` + auditFilePath + `"`, `"outcome":"ok"`,
 		`"outcome":"conflict"`, `"account":"` + ts.URL + `|alice"`, `"duration_ms"`} {
 		if !strings.Contains(out, want) {
 			t.Errorf("log missing %s:\n%s", want, out)
@@ -150,3 +150,9 @@ func TestAuditLog(t *testing.T) {
 		t.Errorf("read tools must log at debug only:\n%s", out)
 	}
 }
+
+const (
+	rootFilePath  = "/f.txt"
+	aliceFilePath = "/remote.php/dav/files/alice/f.txt"
+	auditFilePath = "/audit.txt"
+)

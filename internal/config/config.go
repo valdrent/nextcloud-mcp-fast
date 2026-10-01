@@ -141,6 +141,11 @@ func Load() (*Config, error) {
 	return cfg, nil
 }
 
+const (
+	schemeHTTP  = "http://"
+	schemeHTTPS = "https://"
+)
+
 func (c *Config) validate() error {
 	switch c.Mode {
 	case "stdio", "http":
@@ -148,9 +153,9 @@ func (c *Config) validate() error {
 		return fmt.Errorf("NEXTCLOUD_MCP_TRANSPORT must be 'stdio' or 'http', got %q", c.Mode)
 	}
 
-	if !strings.HasPrefix(c.Host, "http://") && !strings.HasPrefix(c.Host, "https://") {
+	if !strings.HasPrefix(c.Host, schemeHTTP) && !strings.HasPrefix(c.Host, schemeHTTPS) {
 		// Allow bare hostnames for convenience; we normalize to https.
-		c.Host = "https://" + c.Host
+		c.Host = schemeHTTPS + c.Host
 	}
 
 	switch c.Permissions {
@@ -169,6 +174,18 @@ func (c *Config) validate() error {
 		return fmt.Errorf("NEXTCLOUD_MCP_MAX_READ_BYTES must be at least 1024, got %d", c.MaxReadBytes)
 	}
 
+	if err := c.validateResilience(); err != nil {
+		return err
+	}
+
+	if err := c.validateAuth(); err != nil {
+		return err
+	}
+	return c.validateCredentials()
+}
+
+// validateResilience checks the circuit-breaker and log-level settings.
+func (c *Config) validateResilience() error {
 	if c.CircuitBreakerThreshold < 0 {
 		return fmt.Errorf("NEXTCLOUD_MCP_CB_THRESHOLD must not be negative (0 disables the breaker), got %d", c.CircuitBreakerThreshold)
 	}
@@ -184,10 +201,11 @@ func (c *Config) validate() error {
 		return fmt.Errorf("NEXTCLOUD_MCP_LOG_LEVEL must be one of debug, info, warn, error, got %q", c.LogLevel)
 	}
 
-	if err := c.validateAuth(); err != nil {
-		return err
-	}
+	return nil
+}
 
+// validateCredentials checks the account credentials and the static HTTP token.
+func (c *Config) validateCredentials() error {
 	// Single-user mode requires credentials unless passthrough or OAuth user mapping is enabled.
 	if !c.PerRequestCreds() && (c.Username == "" || c.Password == "") {
 		return fmt.Errorf("NEXTCLOUD_USERNAME and NEXTCLOUD_PASSWORD are required (use a Nextcloud App Password), or enable NEXTCLOUD_MCP_PASSTHROUGH=true for multi-account pass-through")
@@ -220,26 +238,41 @@ func (c *Config) validateAuth() error {
 	if c.Mode != "http" {
 		return fmt.Errorf("NEXTCLOUD_MCP_AUTH_MODE=%s requires NEXTCLOUD_MCP_TRANSPORT=http", c.AuthMode)
 	}
-	u, err := url.Parse(c.PublicURL)
-	if err != nil || u.Host == "" || u.Fragment != "" || u.RawQuery != "" {
-		return fmt.Errorf("NEXTCLOUD_MCP_PUBLIC_URL must be an absolute URL without query or fragment, got %q", c.PublicURL)
-	}
-	if u.Scheme != "https" && !(u.Scheme == "http" && isLoopback(u.Hostname())) {
-		return fmt.Errorf("NEXTCLOUD_MCP_PUBLIC_URL must be https (http only on loopback), got %q", c.PublicURL)
+	if err := c.validatePublicURL(); err != nil {
+		return err
 	}
 	if c.AccountsFile == "" && c.AuthMode == AuthOIDC {
 		return fmt.Errorf("NEXTCLOUD_MCP_ACCOUNTS_FILE is required when NEXTCLOUD_MCP_AUTH_MODE=%s", c.AuthMode)
 	}
-	if c.AuthMode == AuthNextcloud && strings.HasPrefix(c.Host, "http://") && !isLoopback(hostOf(c.Host)) {
+	if c.AuthMode == AuthNextcloud && strings.HasPrefix(c.Host, schemeHTTP) && !isLoopback(hostOf(c.Host)) {
 		return fmt.Errorf("NEXTCLOUD_HOST must be https when NEXTCLOUD_MCP_AUTH_MODE=nextcloud")
 	}
-	if c.AuthMode == AuthOIDC {
-		iu, err := url.Parse(c.OIDCIssuer)
-		if err != nil || iu.Host == "" || (iu.Scheme != "https" && !(iu.Scheme == "http" && isLoopback(iu.Hostname()))) {
-			return fmt.Errorf("NEXTCLOUD_MCP_OIDC_ISSUER must be an https URL (http only on loopback), got %q", c.OIDCIssuer)
-		}
+	if c.AuthMode == AuthOIDC && !secureOrLoopbackURL(c.OIDCIssuer) {
+		return fmt.Errorf("NEXTCLOUD_MCP_OIDC_ISSUER must be an https URL (http only on loopback), got %q", c.OIDCIssuer)
 	}
 	return nil
+}
+
+// validatePublicURL checks NEXTCLOUD_MCP_PUBLIC_URL for the OAuth auth modes.
+func (c *Config) validatePublicURL() error {
+	u, err := url.Parse(c.PublicURL)
+	if err != nil || u.Host == "" || u.Fragment != "" || u.RawQuery != "" {
+		return fmt.Errorf("NEXTCLOUD_MCP_PUBLIC_URL must be an absolute URL without query or fragment, got %q", c.PublicURL)
+	}
+	if !secureOrLoopbackURL(c.PublicURL) {
+		return fmt.Errorf("NEXTCLOUD_MCP_PUBLIC_URL must be https (http only on loopback), got %q", c.PublicURL)
+	}
+	return nil
+}
+
+// secureOrLoopbackURL reports whether raw is an absolute https URL, or an
+// http URL pointing at a loopback host.
+func secureOrLoopbackURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	return u.Scheme == "https" || (u.Scheme == "http" && isLoopback(u.Hostname()))
 }
 
 func hostOf(raw string) string {
@@ -270,7 +303,7 @@ func (c *Config) HostAllowed(host string) bool {
 	}
 	for _, h := range c.AllowedHosts {
 		if h == host {
-			if strings.HasPrefix(h, "http://") && !strings.HasPrefix(c.Host, "http://") {
+			if strings.HasPrefix(h, schemeHTTP) && !strings.HasPrefix(c.Host, schemeHTTP) {
 				continue // plaintext allowlist entry only when the default host is plaintext too
 			}
 			return true
