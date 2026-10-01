@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-01
+
 ### Added
 
 - **OAuth 2.0 resource-server mode** (`NEXTCLOUD_MCP_AUTH_MODE=oidc`) so Claude
@@ -125,4 +127,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MKCOL on an existing folder returns 405 MethodNotAllowed from Nextcloud;
   this is now correctly mapped to `conflict` instead of a generic error.
 
-[Unreleased]: https://github.com/valdrent/nextcloud-mcp-fast/commits/main
+[Unreleased]: https://github.com/valdrent/nextcloud-mcp-fast/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/valdrent/nextcloud-mcp-fast/releases/tag/v1.0.0

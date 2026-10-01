@@ -216,9 +216,8 @@ Notes:
   in any case.
 - Use a dedicated Nextcloud account or App Password for Copilot so you can
   revoke it independently.
-- The configuration uses the published container image. Until a release has
-  been tagged, you can use `"command": "go"` with
-  `"args": ["run", "github.com/valdrent/nextcloud-mcp-fast@main"]` instead.
+- The configuration uses the published, signed container image. For
+  reproducible setups, pin a release tag (e.g. `:v1.0.0`) instead of `:latest`.
 - To verify, open a Copilot session's logs and expand **Start MCP Servers**.
 
 ## Tools
