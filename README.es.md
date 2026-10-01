@@ -154,6 +154,14 @@ Después añade el conector en *Settings → Connectors → Add custom connector
 URL `https://tu-dominio/mcp`. El callback OAuth a permitir es
 `https://claude.ai/api/mcp/auth_callback`.
 
+### Consumo real
+
+En un despliegue en producción que sustituyó a un servidor MCP de Nextcloud en
+Python, la RAM en reposo bajó de ~369 MB a ~7 MB (~98 % menos), sin token store,
+volumen de datos ni secretos en el servidor. El coste es el alcance: solo 8
+herramientas de archivos. La guía paso a paso, un Compose endurecido y la
+resolución de problemas están en [docs/oauth-nextcloud.md](docs/oauth-nextcloud.md).
+
 ### GitHub Copilot (cloud agent y code review)
 
 En el repositorio, ve a **Settings → Copilot → MCP servers** y pega:

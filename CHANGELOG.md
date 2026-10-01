@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- Added a hardened Docker Compose example, verification steps, troubleshooting
+  and measured resource usage (~7 MB idle RAM) to `docs/oauth-nextcloud.md`,
+  summarised in both READMEs.
+
 ## [1.0.0] - 2026-10-01
 
 ### Added
