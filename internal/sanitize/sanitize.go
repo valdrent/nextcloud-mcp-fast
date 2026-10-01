@@ -41,6 +41,14 @@ func Sanitize(p string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Percent-decoding can produce bytes the raw input check never saw
+	// (e.g. "%80" or "%00"), so validate the decoded form again.
+	if strings.ContainsRune(decoded, 0) {
+		return "", fmt.Errorf("path contains NUL byte")
+	}
+	if !utf8.ValidString(decoded) {
+		return "", fmt.Errorf("path is not valid UTF-8")
+	}
 
 	decoded = norm.NFC.String(decoded)
 

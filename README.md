@@ -85,6 +85,19 @@ make docker VERSION=v1.0.0
 See [`docker-compose.yml`](docker-compose.yml) for a memory-bounded, read-only
 container example.
 
+### Verifying the image
+
+Docker images are signed with [cosign](https://docs.sigstore.dev/cosign/). Verify the signature before using:
+
+```sh
+cosign verify ghcr.io/valdrent/nextcloud-mcp-fast:v1.0.0 \
+  --certificate-identity-regexp 'https://github.com/valdrent/nextcloud-mcp-fast/.github/workflows/release.yml@refs/tags/.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+This ensures the image was built by the release workflow and has not been tampered with. Keyless signing
+uses GitHub's OIDC token, so no keys are stored or rotated.
+
 ## Configuration (environment variables)
 
 | Variable | Required | Default | Description |
@@ -98,11 +111,12 @@ container example.
 | `NEXTCLOUD_MCP_ALLOWED_HOSTS` | no | — | Comma-separated `scheme://host[:port]` allowlist for passthrough; the configured `NEXTCLOUD_HOST` is always allowed; `http://` entries only if the default host is `http://` |
 | `NEXTCLOUD_MCP_PERMISSIONS` | no | `read` | `read`, `write`, or `destructive` (alias `full`) |
 | `NEXTCLOUD_MCP_PASSTHROUGH` | no | `false` | Allow per-request credentials (multi-account); requires `http` mode. Credentials come only from the `X-Nextcloud-Host`/`X-Nextcloud-Username`/`X-Nextcloud-Password` headers |
-| `NEXTCLOUD_MCP_MAX_READ_BYTES` | no | `1048576` | Cap for a single `read_file` call |
+| `NEXTCLOUD_MCP_MAX_READ_BYTES` | no | `131072` | Cap for a single `read_file` call |
 | `NEXTCLOUD_MCP_MAX_LIST_ENTRIES` | no | `50` | Entries per `list_files` page (max 200) |
 | `NEXTCLOUD_MCP_HTTP_TIMEOUT` | no | `30s` | Per-request WebDAV timeout |
 | `NEXTCLOUD_MCP_CB_THRESHOLD` | no | `10` | Failed calls within window before the breaker trips (`0` disables) |
 | `NEXTCLOUD_MCP_CB_WINDOW` | no | `1m` | Sliding-window duration for the breaker |
+| `NEXTCLOUD_MCP_LOG_LEVEL` | no | `info` | JSON audit log verbosity: `debug`, `info`, `warn`, or `error`; logs every tool call (tool, account, paths, outcome, duration) to stderr |
 
 \* Required unless `NEXTCLOUD_MCP_PASSTHROUGH=true`.
 
@@ -184,12 +198,12 @@ Notes:
 | Tool | Permission | Description |
 |---|---|---|
 | `list_files` | read | List a directory (paginated via `limit`/`offset`) |
-| `read_file` | read | Read a file (text or base64), with `offset`/`length` for partial reads |
-| `write_file` | write | Create/overwrite a file; parent folders are created automatically if missing |
+| `read_file` | read | Read a file (text or base64 with `encoding=base64`); returns `unsupported_type` error for binary content without `encoding=base64`; partial reads with `offset`/`length`; returns `server_error` if the server ignores a Range request; results marked `"trust":"untrusted"` |
+| `write_file` | write | Create a file; parent folders are created automatically if missing; `overwrite` (default false) enables replacing existing files; overwrites require `destructive` permission |
 | `create_folder` | write | Create a directory |
-| `move_file` | write | Rename/move a path; `overwrite` to replace an existing destination |
+| `move_file` | write | Rename/move a path; `overwrite` (default false) to replace an existing destination; overwrites require `destructive` permission |
 | `delete` | destructive | Delete a file or folder — **Nextcloud deletes folders recursively** (items go to the Nextcloud trash bin if it is enabled) |
-| `search_files` | read | Case-insensitive name search (bounded depth) |
+| `search_files` | read | Case-insensitive name search using server-side WebDAV SEARCH (indexed), with fallback to bounded directory walk (max 500 folders, 60s budget) on servers without SEARCH support |
 | `stat` | read | Metadata for a single path |
 
 ## Security model

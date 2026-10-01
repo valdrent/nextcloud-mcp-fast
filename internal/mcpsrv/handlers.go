@@ -101,24 +101,32 @@ func (s *Server) handleRead(ctx context.Context, req *mcp.CallToolRequest, a rea
 		}
 	}
 
-	isText := a.Encoding == "base64" || looksText(data)
-	out := map[string]any{
-		"path":      p,
-		"bytes":     len(data),
-		"truncated": int64(len(data)) >= length && (total < 0 || int64(len(data))+a.Offset < total),
+	if int64(len(data)) > length {
+		data = data[:length] // server ignored the range; honor the cap
 	}
-	if !isText {
-		out["code"] = string(ncerr.CodeUnsupportedType)
-	}
-	if a.Encoding == "base64" || !isText {
+	truncated := int64(len(data)) >= length && (total < 0 || int64(len(data))+a.Offset < total)
+	out := map[string]any{"path": p}
+	if a.Encoding == "base64" {
 		out["encoding"] = "base64"
 		out["content"] = encodeBase64(data)
-		if isText && a.Encoding != "base64" {
-			out["note"] = "content looks binary; re-read with encoding=base64 to retrieve it"
-		}
 	} else {
+		text, ok := textPrefix(data, truncated)
+		if !ok {
+			ct := hdr.Get("Content-Type")
+			if ct != "" {
+				ct += ", "
+			}
+			return nil, nil, ncerr.New(ncerr.CodeUnsupportedType, "file looks binary (%s%d bytes); re-read with encoding=base64 if you really need the raw bytes", ct, len(data))
+		}
+		data = text
 		out["encoding"] = "text"
 		out["content"] = string(data)
+		out["trust"] = "untrusted"
+	}
+	out["bytes"] = len(data)
+	out["truncated"] = truncated
+	if truncated {
+		out["next_offset"] = a.Offset + int64(len(data))
 	}
 	r, err := jsonResult(out)
 	return r, nil, err
@@ -126,12 +134,18 @@ func (s *Server) handleRead(ctx context.Context, req *mcp.CallToolRequest, a rea
 
 // writeArgs are the arguments for write_file.
 type writeArgs struct {
-	Path     string `json:"path" jsonschema:"Destination file path, relative to root"`
-	Content  string `json:"content" jsonschema:"File content (text or base64 when encoding=base64)"`
-	Encoding string `json:"encoding,omitempty" jsonschema:"'text' (default) or 'base64'"`
+	Path      string `json:"path" jsonschema:"Destination file path, relative to root"`
+	Content   string `json:"content" jsonschema:"File content (text or base64 when encoding=base64)"`
+	Encoding  string `json:"encoding,omitempty" jsonschema:"'text' (default) or 'base64'"`
+	Overwrite bool   `json:"overwrite,omitempty" jsonschema:"Replace the file if it exists (default false; requires the 'destructive' permission level)"`
 }
 
 func (s *Server) handleWrite(ctx context.Context, req *mcp.CallToolRequest, a writeArgs) (*mcp.CallToolResult, any, error) {
+	if a.Overwrite {
+		if err := s.guard.Allow(perm.Destructive); err != nil {
+			return nil, nil, err
+		}
+	}
 	client, p, err := s.run(ctx, req, nil, perm.Write, a.Path)
 	if err != nil {
 		return nil, nil, err
@@ -147,7 +161,7 @@ func (s *Server) handleWrite(ctx context.Context, req *mcp.CallToolRequest, a wr
 		data = []byte(a.Content)
 	}
 
-	err = client.Write(ctx, p, strings.NewReader(string(data)), int64(len(data)))
+	err = client.Write(ctx, p, strings.NewReader(string(data)), int64(len(data)), a.Overwrite)
 	s.recordOutcome(req, nil, err)
 	if err != nil {
 		return nil, nil, err
@@ -177,10 +191,15 @@ func (s *Server) handleMkdir(ctx context.Context, req *mcp.CallToolRequest, a mk
 type moveArgs struct {
 	From      string `json:"from" jsonschema:"Source path, relative to root"`
 	To        string `json:"to" jsonschema:"Destination path, relative to root"`
-	Overwrite bool   `json:"overwrite,omitempty" jsonschema:"Replace destination if it exists"`
+	Overwrite bool   `json:"overwrite,omitempty" jsonschema:"Replace destination if it exists (requires the 'destructive' permission level)"`
 }
 
 func (s *Server) handleMove(ctx context.Context, req *mcp.CallToolRequest, a moveArgs) (*mcp.CallToolResult, any, error) {
+	if a.Overwrite {
+		if err := s.guard.Allow(perm.Destructive); err != nil {
+			return nil, nil, err
+		}
+	}
 	client, from, err := s.run(ctx, req, nil, perm.Write, a.From)
 	if err != nil {
 		return nil, nil, err

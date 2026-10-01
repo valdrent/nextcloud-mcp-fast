@@ -66,6 +66,20 @@ Out of scope:
   environment variables, or the App Password.
 - Actions an LLM performs *within* the permission level the operator configured.
 
+## Verifying container images
+
+Docker images published at `ghcr.io/valdrent/nextcloud-mcp-fast` are signed with
+[cosign](https://docs.sigstore.dev/cosign/). Verify the signature before use:
+
+```sh
+cosign verify ghcr.io/valdrent/nextcloud-mcp-fast:<tag> \
+  --certificate-identity-regexp 'https://github.com/valdrent/nextcloud-mcp-fast/.github/workflows/release.yml@refs/tags/.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+This ensures the image was built by the release workflow and has not been tampered with. Images
+include SBOMs (Software Bill of Materials) and provenance attestations for supply-chain transparency.
+
 ## Hardening guidance
 
 See the *Security model* section of the [README](README.md#security-model)

@@ -6,6 +6,9 @@ package config
 
 import (
 	"fmt"
+	"log"
+	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -57,7 +60,7 @@ type Config struct {
 	// http:// hosts are always rejected, regardless of this list.
 	AllowedHosts []string
 
-	// MaxReadBytes caps a single read_file call (default 1 MiB).
+	// MaxReadBytes caps a single read_file call (default 128 KiB).
 	MaxReadBytes int64
 	// MaxListEntries caps entries returned per list_files page (default 50, max 200).
 	MaxListEntries int
@@ -68,6 +71,9 @@ type Config struct {
 	CircuitBreakerThreshold int
 	// CircuitBreakerWindow is the sliding window for the breaker.
 	CircuitBreakerWindow time.Duration
+	// LogLevel is the audit-log verbosity: debug, info, warn or error
+	// (default info). Writes are logged at info, reads at debug.
+	LogLevel string
 
 	// Version is set by main from build info; used in logs and /healthz.
 	Version string
@@ -76,6 +82,7 @@ type Config struct {
 // Load reads configuration from environment variables (with NEXTCLOUD_ prefix)
 // and validates it. It returns an error describing the first problem found.
 func Load() (*Config, error) {
+	ep := &envParser{}
 	cfg := &Config{
 		Mode:                    envStr("NEXTCLOUD_MCP_TRANSPORT", "stdio"),
 		HTTPAddr:                envStr("NEXTCLOUD_MCP_HTTP_ADDR", "127.0.0.1:8000"),
@@ -84,18 +91,23 @@ func Load() (*Config, error) {
 		Username:                envStr("NEXTCLOUD_USERNAME", ""),
 		Password:                envStr("NEXTCLOUD_PASSWORD", ""),
 		Permissions:             strings.ToLower(envStr("NEXTCLOUD_MCP_PERMISSIONS", PermRead)),
-		AllowPassthrough:        envBool("NEXTCLOUD_MCP_PASSTHROUGH", false),
+		AllowPassthrough:        ep.envBool("NEXTCLOUD_MCP_PASSTHROUGH", false),
 		AllowedHosts:            envList("NEXTCLOUD_MCP_ALLOWED_HOSTS"),
-		MaxReadBytes:            envInt64("NEXTCLOUD_MCP_MAX_READ_BYTES", 1<<20),
-		MaxListEntries:          envInt("NEXTCLOUD_MCP_MAX_LIST_ENTRIES", 50),
-		HTTPTimeout:             envDuration("NEXTCLOUD_MCP_HTTP_TIMEOUT", 30*time.Second),
-		CircuitBreakerThreshold: envInt("NEXTCLOUD_MCP_CB_THRESHOLD", 10),
-		CircuitBreakerWindow:    envDuration("NEXTCLOUD_MCP_CB_WINDOW", time.Minute),
+		MaxReadBytes:            ep.envInt64("NEXTCLOUD_MCP_MAX_READ_BYTES", 128<<10),
+		MaxListEntries:          ep.envInt("NEXTCLOUD_MCP_MAX_LIST_ENTRIES", 50),
+		HTTPTimeout:             ep.envDuration("NEXTCLOUD_MCP_HTTP_TIMEOUT", 30*time.Second),
+		CircuitBreakerThreshold: ep.envInt("NEXTCLOUD_MCP_CB_THRESHOLD", 10),
+		CircuitBreakerWindow:    ep.envDuration("NEXTCLOUD_MCP_CB_WINDOW", time.Minute),
+		LogLevel:                strings.ToLower(envStr("NEXTCLOUD_MCP_LOG_LEVEL", "info")),
 	}
 
+	if ep.err != nil {
+		return nil, ep.err
+	}
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
+	cfg.warnPlaintext()
 	return cfg, nil
 }
 
@@ -125,6 +137,21 @@ func (c *Config) validate() error {
 	}
 	if c.MaxReadBytes < 1024 {
 		return fmt.Errorf("NEXTCLOUD_MCP_MAX_READ_BYTES must be at least 1024, got %d", c.MaxReadBytes)
+	}
+
+	if c.CircuitBreakerThreshold < 0 {
+		return fmt.Errorf("NEXTCLOUD_MCP_CB_THRESHOLD must not be negative (0 disables the breaker), got %d", c.CircuitBreakerThreshold)
+	}
+	if c.CircuitBreakerThreshold > 0 && c.CircuitBreakerWindow <= 0 {
+		return fmt.Errorf("NEXTCLOUD_MCP_CB_WINDOW must be positive when the breaker is enabled, got %s", c.CircuitBreakerWindow)
+	}
+	if c.LogLevel == "" {
+		c.LogLevel = "info"
+	}
+	switch c.LogLevel {
+	case "debug", "info", "warn", "error":
+	default:
+		return fmt.Errorf("NEXTCLOUD_MCP_LOG_LEVEL must be one of debug, info, warn, error, got %q", c.LogLevel)
 	}
 
 	// Single-user mode requires credentials unless passthrough is enabled.
@@ -166,14 +193,21 @@ func (c *Config) HostAllowed(host string) bool {
 	return false
 }
 
-// HasPermission reports whether the configured permission level includes the
-// requested level.
-func (c *Config) HasPermission(level string) bool {
-	order := map[string]int{PermRead: 0, PermWrite: 1, PermDestructive: 2}
-	if order[c.Permissions] >= order[level] {
-		return true
+// warnPlaintext logs a warning when the Host is plain http:// on a
+// non-loopback address, since Basic auth would travel in clear text.
+func (c *Config) warnPlaintext() {
+	u, err := url.Parse(c.Host)
+	if err != nil || u.Scheme != "http" {
+		return
 	}
-	return false
+	h := u.Hostname()
+	if h == "localhost" {
+		return
+	}
+	if ip := net.ParseIP(h); ip != nil && ip.IsLoopback() {
+		return
+	}
+	log.Printf("WARNING: NEXTCLOUD_HOST %s uses plain http://; credentials (HTTP Basic auth) travel in clear text. Use https:// outside of loopback.", c.Host)
 }
 
 func envStr(key, def string) string {
@@ -183,49 +217,62 @@ func envStr(key, def string) string {
 	return def
 }
 
-func envBool(key string, def bool) bool {
+// envParser reads typed env vars, remembering the first unparsable value.
+type envParser struct{ err error }
+
+func (p *envParser) fail(key, v string, err error) {
+	if p.err == nil {
+		p.err = fmt.Errorf("%s: invalid value %q: %v", key, v, err)
+	}
+}
+
+func (p *envParser) envBool(key string, def bool) bool {
 	v := os.Getenv(key)
 	if v == "" {
 		return def
 	}
 	b, err := strconv.ParseBool(v)
 	if err != nil {
+		p.fail(key, v, err)
 		return def
 	}
 	return b
 }
 
-func envInt(key string, def int) int {
+func (p *envParser) envInt(key string, def int) int {
 	v := os.Getenv(key)
 	if v == "" {
 		return def
 	}
 	n, err := strconv.Atoi(v)
 	if err != nil {
+		p.fail(key, v, err)
 		return def
 	}
 	return n
 }
 
-func envInt64(key string, def int64) int64 {
+func (p *envParser) envInt64(key string, def int64) int64 {
 	v := os.Getenv(key)
 	if v == "" {
 		return def
 	}
 	n, err := strconv.ParseInt(v, 10, 64)
 	if err != nil {
+		p.fail(key, v, err)
 		return def
 	}
 	return n
 }
 
-func envDuration(key string, def time.Duration) time.Duration {
+func (p *envParser) envDuration(key string, def time.Duration) time.Duration {
 	v := os.Getenv(key)
 	if v == "" {
 		return def
 	}
 	d, err := time.ParseDuration(v)
 	if err != nil {
+		p.fail(key, v, err)
 		return def
 	}
 	return d

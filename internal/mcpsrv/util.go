@@ -4,8 +4,10 @@
 package mcpsrv
 
 import (
+	"bytes"
 	"encoding/base64"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/valdrent/nextcloud-mcp-fast/internal/webdav"
 )
@@ -46,23 +48,28 @@ func orRoot(p string) string {
 	return p
 }
 
-// looksText heuristically reports whether data is printable text (no NULs in
-// the first 8 KiB and a high ratio of printable bytes).
-func looksText(data []byte) bool {
-	n := len(data)
-	if n > 8192 {
-		n = 8192
+// textPrefix reports whether data is text (no NUL bytes, valid UTF-8) and
+// returns the longest prefix that does not end inside a UTF-8 sequence. When
+// truncated is true, up to 3 trailing bytes forming an incomplete rune (the
+// read was cut mid-character) are tolerated and trimmed from the result.
+func textPrefix(data []byte, truncated bool) ([]byte, bool) {
+	if bytes.IndexByte(data, 0) >= 0 {
+		return nil, false
 	}
-	printable := 0
-	for _, b := range data[:n] {
-		if b == 0 {
-			return false
-		}
-		if b >= 0x20 || b == '\t' || b == '\n' || b == '\r' {
-			printable++
+	if truncated {
+		for k := 1; k <= utf8.UTFMax-1 && k <= len(data); k++ {
+			if utf8.RuneStart(data[len(data)-k]) {
+				if !utf8.FullRune(data[len(data)-k:]) {
+					data = data[:len(data)-k]
+				}
+				break
+			}
 		}
 	}
-	return printable*10 >= n*9 // >= 90% printable
+	if !utf8.Valid(data) {
+		return nil, false
+	}
+	return data, true
 }
 
 func encodeBase64(data []byte) string {

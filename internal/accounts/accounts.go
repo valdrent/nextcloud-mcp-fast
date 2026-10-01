@@ -63,14 +63,21 @@ func passHash(pass string) string {
 
 // NewRegistry builds a Registry with a shared, pooled http client.
 func NewRegistry(cfg *config.Config) *Registry {
+	// Clone DefaultTransport to preserve proxy settings from env and TLS/dial timeouts
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConns = 100
+	transport.MaxIdleConnsPerHost = 32
+	transport.IdleConnTimeout = 90 * time.Second
+
 	return &Registry{
 		cfg: cfg,
 		http: &http.Client{
-			Timeout: cfg.HTTPTimeout,
-			Transport: &http.Transport{
-				MaxIdleConns:        100,
-				MaxIdleConnsPerHost: 8,
-				IdleConnTimeout:     90 * time.Second,
+			Timeout:   cfg.HTTPTimeout,
+			Transport: transport,
+			// Disable automatic redirect following to prevent SSRF via 3xx responses
+			// to internal addresses from a compromised Nextcloud server
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
 			},
 		},
 		clients:  expirable.NewLRU[string, *webdav.Client](authCacheSize, nil, authOKTTL),

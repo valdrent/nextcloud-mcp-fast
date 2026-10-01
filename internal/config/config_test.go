@@ -4,10 +4,15 @@
 package config
 
 import (
+	"bytes"
+	"log"
+	"os"
 	"strings"
 	"testing"
 	"time"
 )
+
+const testHost = "https://c.example.com"
 
 // withEnv sets env vars for the duration of a test (auto-cleanup).
 func withEnv(t *testing.T, kv map[string]string) {
@@ -35,6 +40,9 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.MaxListEntries != 50 {
 		t.Errorf("MaxListEntries = %d, want 50", cfg.MaxListEntries)
+	}
+	if cfg.MaxReadBytes != 128<<10 {
+		t.Errorf("MaxReadBytes = %d, want 131072", cfg.MaxReadBytes)
 	}
 	if cfg.HTTPTimeout != 30*time.Second {
 		t.Errorf("HTTPTimeout = %v, want 30s", cfg.HTTPTimeout)
@@ -123,29 +131,6 @@ func TestLoadPassthroughRelaxesCreds(t *testing.T) {
 	}
 }
 
-func TestHasPermission(t *testing.T) {
-	cases := []struct {
-		level string
-		op    string
-		want  bool
-	}{
-		{"read", "read", true},
-		{"read", "write", false},
-		{"write", "read", true},
-		{"write", "write", true},
-		{"write", "destructive", false},
-		{"destructive", "destructive", true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.level+"->"+tc.op, func(t *testing.T) {
-			c := &Config{Permissions: tc.level}
-			if got := c.HasPermission(tc.op); got != tc.want {
-				t.Errorf("HasPermission(%q) = %v, want %v", tc.op, got, tc.want)
-			}
-		})
-	}
-}
-
 func TestHostAllowed(t *testing.T) {
 	c := &Config{Host: "https://cloud.example.com", AllowedHosts: []string{"https://other.example.com", "http://plain.example.com"}}
 	cases := []struct {
@@ -169,7 +154,7 @@ func TestHostAllowed(t *testing.T) {
 
 func TestValidateTokenAndPassthrough(t *testing.T) {
 	base := func() *Config {
-		return &Config{Mode: "http", Host: "https://c.example.com", Username: "u", Password: "p",
+		return &Config{Mode: "http", Host: testHost, Username: "u", Password: "p",
 			Permissions: PermRead, MaxListEntries: 50, MaxReadBytes: 1 << 20, HTTPToken: strings.Repeat("x", 32)}
 	}
 	cases := []struct {
@@ -188,6 +173,74 @@ func TestValidateTokenAndPassthrough(t *testing.T) {
 		tc.mut(c)
 		if err := c.validate(); (err != nil) != tc.wantErr {
 			t.Errorf("%s: err = %v, wantErr %v", tc.name, err, tc.wantErr)
+		}
+	}
+}
+
+func TestValidateBreakerAndLogLevel(t *testing.T) {
+	base := func() *Config {
+		return &Config{Mode: "stdio", Host: testHost, Username: "u", Password: "p",
+			Permissions: PermRead, MaxListEntries: 50, MaxReadBytes: 1 << 20,
+			CircuitBreakerThreshold: 5, CircuitBreakerWindow: time.Minute, LogLevel: "info"}
+	}
+	cases := []struct {
+		name    string
+		mut     func(*Config)
+		wantErr bool
+	}{
+		{"ok", func(*Config) {}, false},
+		{"disabled", func(c *Config) { c.CircuitBreakerThreshold = 0; c.CircuitBreakerWindow = 0 }, false},
+		{"negative threshold", func(c *Config) { c.CircuitBreakerThreshold = -1 }, true},
+		{"zero window enabled", func(c *Config) { c.CircuitBreakerWindow = 0 }, true},
+		{"debug", func(c *Config) { c.LogLevel = "debug" }, false},
+		{"bad level", func(c *Config) { c.LogLevel = "loud" }, true},
+	}
+	for _, tc := range cases {
+		c := base()
+		tc.mut(c)
+		if err := c.validate(); (err != nil) != tc.wantErr {
+			t.Errorf("%s: err = %v, wantErr %v", tc.name, err, tc.wantErr)
+		}
+	}
+}
+
+func TestLoadParseErrors(t *testing.T) {
+	for _, tc := range []struct{ key, val string }{
+		{"NEXTCLOUD_MCP_CB_THRESHOLD", "abc"},
+		{"NEXTCLOUD_MCP_PASSTHROUGH", "yes"},
+		{"NEXTCLOUD_MCP_MAX_READ_BYTES", "1MB"},
+		{"NEXTCLOUD_MCP_HTTP_TIMEOUT", "soon"},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			withEnv(t, map[string]string{
+				"NEXTCLOUD_HOST": testHost, "NEXTCLOUD_USERNAME": "a", "NEXTCLOUD_PASSWORD": "p",
+				tc.key: tc.val,
+			})
+			_, err := Load()
+			if err == nil || !strings.Contains(err.Error(), tc.key) || !strings.Contains(err.Error(), tc.val) {
+				t.Errorf("err = %v, want mention of %s and %q", err, tc.key, tc.val)
+			}
+		})
+	}
+}
+
+func TestLoadPlaintextWarning(t *testing.T) {
+	for host, wantWarn := range map[string]bool{
+		"http://cloud.example.com":  true,
+		"http://localhost:8080":     false,
+		"http://127.0.0.2":          false,
+		"http://[::1]:8080":         false,
+		"https://cloud.example.com": false,
+	} {
+		var buf bytes.Buffer
+		log.SetOutput(&buf)
+		withEnv(t, map[string]string{"NEXTCLOUD_HOST": host, "NEXTCLOUD_USERNAME": "a", "NEXTCLOUD_PASSWORD": "p"})
+		if _, err := Load(); err != nil {
+			t.Fatal(err)
+		}
+		log.SetOutput(os.Stderr)
+		if got := strings.Contains(buf.String(), "plain http://"); got != wantWarn {
+			t.Errorf("%s: warned=%v, want %v (%q)", host, got, wantWarn, buf.String())
 		}
 	}
 }

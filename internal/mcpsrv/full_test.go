@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -104,6 +105,10 @@ func (m *statefulMock) handler(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPut:
 		if !m.folders[parentOf(p)] {
 			w.WriteHeader(http.StatusConflict)
+			return
+		}
+		if _, exists := m.files[p]; exists && r.Header.Get("If-None-Match") == "*" {
+			w.WriteHeader(http.StatusPreconditionFailed)
 			return
 		}
 		body := make([]byte, 0)
@@ -481,10 +486,57 @@ func TestReadOffsetAndNegative(t *testing.T) {
 	if isErr {
 		t.Fatalf("read_file: %s", text)
 	}
-	if !strings.Contains(text, strings.Repeat("a", 1<<20)) || strings.Contains(text, strings.Repeat("a", 1<<20+1)) {
-		t.Errorf("expected exactly 1MiB of content, got %d bytes of response", len(text))
+	if !strings.Contains(text, strings.Repeat("a", 128<<10)) || strings.Contains(text, strings.Repeat("a", 128<<10+1)) {
+		t.Errorf("expected exactly 128KiB of content, got %d bytes of response", len(text))
 	}
 	if _, isErr := callText(t, cs, "read_file", map[string]any{"path": "/big.txt", "offset": -1}); !isErr {
 		t.Errorf("negative offset should error")
+	}
+}
+
+func TestReadFileTextSafety(t *testing.T) {
+	m := newStatefulMock()
+	// 1023 ASCII bytes then a 3-byte rune straddling a 1024-byte cut.
+	m.files["/remote.php/dav/files/alice/u.txt"] = strings.Repeat("a", 1023) + "€€"
+	m.files["/remote.php/dav/files/alice/b.bin"] = "ab\x00\x01cd"
+	ts := httptest.NewServer(http.HandlerFunc(m.handler))
+	defer ts.Close()
+	m.baseURL = ts.URL
+	cs, done := newFullTestServer(t, ts.URL, "read")
+	defer done()
+
+	text, isErr := callText(t, cs, "read_file", map[string]any{"path": "/u.txt", "length": 1024})
+	if isErr {
+		t.Fatalf("read_file: %s", text)
+	}
+	var got struct {
+		Content    string `json:"content"`
+		Bytes      int    `json:"bytes"`
+		Truncated  bool   `json:"truncated"`
+		NextOffset int64  `json:"next_offset"`
+		Trust      string `json:"trust"`
+	}
+	if err := json.Unmarshal([]byte(text), &got); err != nil {
+		t.Fatal(err)
+	}
+	if ok := got.Bytes == 1023 && got.NextOffset == 1023 && got.Truncated; !ok || got.Trust != "untrusted" || !utf8.ValidString(got.Content) {
+		t.Errorf("unexpected result: bytes=%d next=%d trunc=%v trust=%q", got.Bytes, got.NextOffset, got.Truncated, got.Trust)
+	}
+
+	if text, isErr := callText(t, cs, "read_file", map[string]any{"path": "/b.bin"}); !isErr || !strings.Contains(text, "unsupported_type") && !strings.Contains(text, "base64") {
+		t.Errorf("binary without base64 should error, got %q (isErr=%v)", text, isErr)
+	}
+	if text, isErr := callText(t, cs, "read_file", map[string]any{"path": "/b.bin", "encoding": "base64"}); isErr || !strings.Contains(text, "YWIAAWNk") {
+		t.Errorf("base64 read failed: %q", text)
+	}
+}
+
+func TestInstructionsUntrusted(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(newStatefulMock().handler))
+	defer ts.Close()
+	cs, done := newFullTestServer(t, ts.URL, "read")
+	defer done()
+	if ins := cs.InitializeResult().Instructions; !strings.Contains(ins, "untrusted data") {
+		t.Errorf("instructions missing untrusted sentence: %q", ins)
 	}
 }

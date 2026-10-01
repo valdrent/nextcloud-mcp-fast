@@ -10,6 +10,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	ncerr "github.com/valdrent/nextcloud-mcp-fast/internal/errors"
 )
 
 func TestWriteCreatesParentFolders(t *testing.T) {
@@ -34,7 +36,7 @@ func TestWriteCreatesParentFolders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	err = c.Write(context.Background(), "/sub/deep/nested.txt", strings.NewReader("x"), 1)
+	err = c.Write(context.Background(), "/sub/deep/nested.txt", strings.NewReader("x"), 1, true)
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -67,7 +69,7 @@ func TestWriteSkipsExistingParents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
-	err = c.Write(context.Background(), "/sub/nested.txt", strings.NewReader("x"), 1)
+	err = c.Write(context.Background(), "/sub/nested.txt", strings.NewReader("x"), 1, true)
 	if err != nil {
 		t.Errorf("Write with existing parent should succeed, got: %v", err)
 	}
@@ -124,5 +126,46 @@ func TestReadSuffixRange(t *testing.T) {
 	body.Close()
 	if gotRange != "bytes=10-" {
 		t.Errorf("Range header = %q, want %q", gotRange, "bytes=10-")
+	}
+}
+
+func TestReadRangeIgnoredIsError(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "whole body") // 200 despite Range
+	}))
+	defer ts.Close()
+	c, _ := NewClient(&Credentials{Host: ts.URL, Username: "alice", Password: "p"}, &http.Client{})
+	if _, _, err := c.Read(context.Background(), "/f.txt", 5, 3); !ncerr.Is(err, ncerr.CodeServerError) {
+		t.Fatalf("want server_error, got %v", err)
+	}
+	// offset 0 with a 200 is fine.
+	body, _, err := c.Read(context.Background(), "/f.txt", 0, 3)
+	if err != nil {
+		t.Fatalf("offset 0: %v", err)
+	}
+	body.Close()
+}
+
+func TestWriteIfNoneMatch(t *testing.T) {
+	var inm []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		inm = append(inm, r.Header.Get("If-None-Match"))
+		if r.Header.Get("If-None-Match") == "*" {
+			w.WriteHeader(http.StatusPreconditionFailed)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer ts.Close()
+	c, _ := NewClient(&Credentials{Host: ts.URL, Username: "alice", Password: "p"}, &http.Client{})
+	err := c.Write(context.Background(), "/f.txt", strings.NewReader("x"), 1, false)
+	if !ncerr.Is(err, ncerr.CodeConflict) || !strings.Contains(err.Error(), "overwrite=true") {
+		t.Fatalf("want actionable conflict, got %v", err)
+	}
+	if err := c.Write(context.Background(), "/f.txt", strings.NewReader("x"), 1, true); err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+	if inm[0] != "*" || inm[1] != "" {
+		t.Errorf("If-None-Match = %q", inm)
 	}
 }

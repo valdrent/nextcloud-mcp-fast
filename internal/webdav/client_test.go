@@ -4,8 +4,14 @@
 package webdav
 
 import (
+	"context"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+
+	ncerr "github.com/valdrent/nextcloud-mcp-fast/internal/errors"
 )
 
 func TestToRel(t *testing.T) {
@@ -114,5 +120,82 @@ func TestToRelDecoded(t *testing.T) {
 	got, ok := toRel(decodeHref("/remote.php/dav/files/alice/docs/my%20file.txt"), "alice")
 	if !ok || got != "/docs/my file.txt" {
 		t.Errorf("toRel(decoded) = (%q, %v), want (\"/docs/my file.txt\", true)", got, ok)
+	}
+}
+
+// TestPROPFINDResponseSizeCap verifies that PROPFIND responses exceeding the
+// configured limit return a too_large error instead of silently truncating.
+func TestPROPFINDResponseSizeCap(t *testing.T) {
+	// Save and restore the original limit
+	originalLimit := maxXMLResponseBytes
+	defer func() { maxXMLResponseBytes = originalLimit }()
+
+	// Set a small cap for testing (1 KiB)
+	maxXMLResponseBytes = 1024
+
+	// Create a test server that returns a large PROPFIND response
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "PROPFIND" {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		u, p, _ := r.BasicAuth()
+		if u != "alice" || p != "pass" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+
+		// Return a response larger than 1 KiB
+		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+		w.WriteHeader(http.StatusMultiStatus)
+		fmt.Fprint(w, `<?xml version="1.0"?>
+<D:multistatus xmlns:D="DAV:">
+  <D:response>
+    <D:href>/remote.php/dav/files/alice/</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:resourcetype><D:collection/></D:resourcetype>
+        <D:getcontentlength>0</D:getcontentlength>
+        <D:getlastmodified>Wed, 01 Jan 2025 00:00:00 GMT</D:getlastmodified>
+      </D:prop>
+    </D:propstat>
+  </D:response>
+`)
+		// Add enough content to exceed 1 KiB
+		for i := 0; i < 100; i++ {
+			fmt.Fprintf(w, `  <D:response>
+    <D:href>/remote.php/dav/files/alice/file%d.txt</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:getcontentlength>1024</D:getcontentlength>
+        <D:getlastmodified>Wed, 01 Jan 2025 00:00:00 GMT</D:getlastmodified>
+      </D:prop>
+    </D:propstat>
+  </D:response>
+`, i)
+		}
+		fmt.Fprint(w, `</D:multistatus>`)
+	}))
+	defer srv.Close()
+
+	creds := &Credentials{
+		Host:     srv.URL,
+		Username: "alice",
+		Password: "pass",
+	}
+	c, err := NewClient(creds, &http.Client{})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	// Call Stat which uses PROPFIND internally
+	_, err = c.Stat(context.Background(), "/")
+
+	// Verify it returns a too_large error
+	if !ncerr.Is(err, ncerr.CodeTooLarge) {
+		t.Errorf("Stat returned err = %v, want CodeTooLarge", err)
+	}
+	if err != nil && !strings.Contains(err.Error(), "exceeds") {
+		t.Errorf("error message should mention exceeding limit: %v", err)
 	}
 }

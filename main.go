@@ -68,23 +68,39 @@ func runStdio(s *mcp.Server) {
 	}
 }
 
-func runHTTP(s *mcp.Server, cfg *config.Config) {
+// buildHTTPHandler constructs the HTTP handler stack for the MCP server.
+// It is separated from runHTTP for testability.
+func buildHTTPHandler(s *mcp.Server, token string) http.Handler {
 	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, &mcp.StreamableHTTPOptions{
-		SessionTimeout: 30 * time.Minute,
+		Stateless: true,
 	})
 
 	mux := http.NewServeMux()
-	mux.Handle("/", requireBearer(cfg.HTTPToken, handler))
+	mux.Handle("/", requireBearer(token, handler))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"status":"ok","version":"` + cfg.Version + `"}`))
+		w.Write([]byte(`{"status":"ok","version":"` + version + `"}`))
 	})
+	return mux
+}
 
-	httpServer := &http.Server{
-		Addr:              cfg.HTTPAddr,
-		Handler:           mux,
+// buildHTTPServer constructs the http.Server with proper hardening timeouts
+// and limits. It is separated from runHTTP for testability.
+func buildHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		WriteTimeout:      2 * time.Minute,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    64 << 10,
 	}
+}
+
+func runHTTP(s *mcp.Server, cfg *config.Config) {
+	handler := buildHTTPHandler(s, cfg.HTTPToken)
+	httpServer := buildHTTPServer(cfg.HTTPAddr, handler)
 
 	go func() {
 		log.Printf("nextcloud-mcp-fast %s listening on %s (streamable-http)", version, cfg.HTTPAddr)

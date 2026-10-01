@@ -69,6 +69,18 @@ make docker VERSION=v1.0.0
 
 Ver [`docker-compose.yml`](docker-compose.yml) para un ejemplo de contenedor con memoria acotada y solo lectura.
 
+### Verificar la imagen
+
+Las imágenes Docker están firmadas con [cosign](https://docs.sigstore.dev/cosign/). Verifica la firma antes de usarla:
+
+```sh
+cosign verify ghcr.io/valdrent/nextcloud-mcp-fast:v1.0.0 \
+  --certificate-identity-regexp 'https://github.com/valdrent/nextcloud-mcp-fast/.github/workflows/release.yml@refs/tags/.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+Esto garantiza que la imagen fue construida por el flujo de trabajo de lanzamiento y no ha sido alterada. La firma sin claves usa el token OIDC de GitHub, por lo que no hay claves almacenadas ni rotadas.
+
 ## Configuración (variables de entorno)
 
 | Variable | Obligatoria | Por defecto | Descripción |
@@ -82,11 +94,12 @@ Ver [`docker-compose.yml`](docker-compose.yml) para un ejemplo de contenedor con
 | `NEXTCLOUD_MCP_ALLOWED_HOSTS` | no | — | Lista blanca separada por comas de `scheme://host[:puerto]` para pass-through; `NEXTCLOUD_HOST` siempre está permitido; las entradas `http://` solo si el host por defecto es `http://` |
 | `NEXTCLOUD_MCP_PERMISSIONS` | no | `read` | `read`, `write` o `destructive` (alias `full`) |
 | `NEXTCLOUD_MCP_PASSTHROUGH` | no | `false` | Permite credenciales por solicitud (multi-cuenta); requiere modo `http`. Las credenciales solo llegan por las cabeceras `X-Nextcloud-Host`/`X-Nextcloud-Username`/`X-Nextcloud-Password` |
-| `NEXTCLOUD_MCP_MAX_READ_BYTES` | no | `1048576` | Límite para una sola llamada a `read_file` |
+| `NEXTCLOUD_MCP_MAX_READ_BYTES` | no | `131072` | Límite para una sola llamada a `read_file` |
 | `NEXTCLOUD_MCP_MAX_LIST_ENTRIES` | no | `50` | Entradas por página de `list_files` (máx. 200) |
 | `NEXTCLOUD_MCP_HTTP_TIMEOUT` | no | `30s` | Timeout WebDAV por solicitud |
 | `NEXTCLOUD_MCP_CB_THRESHOLD` | no | `10` | Llamadas fallidas dentro de la ventana antes de disparar el disyuntor (`0` lo desactiva) |
 | `NEXTCLOUD_MCP_CB_WINDOW` | no | `1m` | Duración de la ventana deslizante del disyuntor |
+| `NEXTCLOUD_MCP_LOG_LEVEL` | no | `info` | Verbosidad del registro de auditoría JSON: `debug`, `info`, `warn` o `error`; registra cada llamada de herramienta (herramienta, cuenta, rutas, resultado, duración) en stderr |
 
 \* Obligatoria salvo que `NEXTCLOUD_MCP_PASSTHROUGH=true`.
 
@@ -167,13 +180,13 @@ Notas:
 | Herramienta | Permiso | Descripción |
 |---|---|---|
 | `list_files` | read | Lista un directorio (paginado vía `limit`/`offset`) |
-| `read_file` | read | Lee un archivo (texto o base64), con `offset`/`length` para lecturas parciales |
-| `write_file` | write | Crea/sobrescribe un archivo; las carpetas padres se crean automáticamente si no existen |
+| `read_file` | read | Lee un archivo (texto o base64 con `encoding=base64`); devuelve `unsupported_type` para contenido binario sin `encoding=base64`; lecturas parciales con `offset`/`length`; devuelve `server_error` si el servidor ignora una solicitud Range; resultados marcados `"trust":"untrusted"` |
+| `write_file` | write | Crea un archivo; las carpetas padre se crean automáticamente si no existen; `overwrite` (default false) habilita reemplazar archivos existentes; las sobrescrituras requieren permiso `destructive` |
 | `create_folder` | write | Crea un directorio |
-| `move_file` | write | Renombra/mueve una ruta; `overwrite` para reemplazar un destino existente |
+| `move_file` | write | Renombra/mueve una ruta; `overwrite` (default false) para reemplazar un destino existente; las sobrescrituras requieren permiso `destructive` |
 | `delete` | destructive | Elimina un archivo o carpeta — **Nextcloud elimina las carpetas de forma recursiva** (los elementos van a la papelera de Nextcloud si está habilitada) |
-| `search_files` | read | Búsqueda de nombres sin distinguir mayúsculas (profundidad acotada) |
-| `stat` | read | Metadatos de una única ruta |
+| `search_files` | read | Búsqueda de nombres con búsqueda WebDAV del lado del servidor (indexada), con alternativa a caminata de directorio acotada (máx. 500 carpetas, presupuesto de 60s) en servidores sin soporte SEARCH |
+| `stat` | read | Metadatos para una única ruta |
 
 ## Modelo de seguridad
 

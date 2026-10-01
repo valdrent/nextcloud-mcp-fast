@@ -19,6 +19,42 @@ import (
 	ncerr "github.com/valdrent/nextcloud-mcp-fast/internal/errors"
 )
 
+// maxXMLResponseBytes is the maximum size for PROPFIND and SEARCH responses.
+// Exceeding this limit returns an error instead of silently truncating data.
+// This is a package variable so tests can override it with a smaller cap.
+var maxXMLResponseBytes int64 = 32 << 20 // 32 MiB
+
+// limitedReader wraps an io.ReadCloser and enforces a maximum byte limit.
+// Reading beyond the limit returns an error instead of truncating.
+type limitedReader struct {
+	rc    io.ReadCloser
+	limit int64
+	read  int64
+}
+
+func (lr *limitedReader) Read(p []byte) (int, error) {
+	// Allow one byte beyond the limit so a body of exactly limit bytes
+	// succeeds; only a byte past the limit is an error.
+	if lr.read > lr.limit {
+		lr.rc.Close()
+		return 0, ncerr.New(ncerr.CodeTooLarge, "folder listing response exceeds %d bytes", lr.limit)
+	}
+	if int64(len(p)) > lr.limit+1-lr.read {
+		p = p[:lr.limit+1-lr.read]
+	}
+	n, err := lr.rc.Read(p)
+	lr.read += int64(n)
+	if lr.read > lr.limit {
+		lr.rc.Close()
+		return 0, ncerr.New(ncerr.CodeTooLarge, "folder listing response exceeds %d bytes", lr.limit)
+	}
+	return n, err
+}
+
+func (lr *limitedReader) Close() error {
+	return lr.rc.Close()
+}
+
 // Credentials identify one Nextcloud account.
 type Credentials struct {
 	Host     string // e.g. https://cloud.example.com (no trailing slash)
@@ -109,7 +145,8 @@ func (c *Client) AuthCheck(ctx context.Context) error {
 
 // do executes a request and returns the response. Callers must close the body.
 // Non-2xx responses are returned as-is so callers can map them to semantic
-// errors with detail.
+// errors with detail. For PROPFIND and SEARCH methods, the response body is
+// wrapped to enforce a maximum size limit.
 func (c *Client) do(ctx context.Context, method, url string, header http.Header, body io.Reader) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
@@ -126,6 +163,12 @@ func (c *Client) do(ctx context.Context, method, url string, header http.Header,
 		}
 		return nil, err
 	}
+
+	// Wrap the response body for PROPFIND and SEARCH to enforce size limits
+	if method == "PROPFIND" || method == "SEARCH" {
+		resp.Body = &limitedReader{rc: resp.Body, limit: maxXMLResponseBytes}
+	}
+
 	return resp, nil
 }
 

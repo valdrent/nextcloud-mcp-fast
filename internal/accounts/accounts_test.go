@@ -233,3 +233,95 @@ func TestNegativeCache(t *testing.T) {
 		t.Errorf("server requests = %d, want 1", got)
 	}
 }
+
+// TestNoRedirectFollowing verifies that redirects from Nextcloud servers are
+// not automatically followed, preventing SSRF attacks via 3xx responses to
+// internal addresses. A 302 redirect to an internal server must not result
+// in a second request to that server.
+func TestNoRedirectFollowing(t *testing.T) {
+	var externalReqs atomic.Int64
+	var internalReqs atomic.Int64
+
+	// Redirect server: returns 302 to an internal server
+	external := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		externalReqs.Add(1)
+		u, p, _ := r.BasicAuth()
+		if u != "alice" || p != "pass" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		// Redirect to internal server
+		w.Header().Set("Location", "http://127.0.0.1:9999/internal")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer external.Close()
+
+	// Internal server that must never be reached
+	internal := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		internalReqs.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer internal.Close()
+
+	cfg := passthroughCfg(external.URL)
+	r := NewRegistry(cfg)
+
+	// Attempt to resolve against the redirect server
+	_, err := r.Resolve(context.Background(), external.URL, "alice", "pass")
+
+	// Should fail due to redirect being rejected
+	if err == nil {
+		t.Errorf("expected error for rejected redirect, got nil")
+	}
+
+	// Verify external server was called
+	if got := externalReqs.Load(); got != 1 {
+		t.Errorf("external server requests = %d, want 1", got)
+	}
+
+	// Verify internal server was never contacted
+	if got := internalReqs.Load(); got != 0 {
+		t.Errorf("internal server requests = %d, want 0", got)
+	}
+}
+
+// TestTransportSettings verifies the transport has proper HTTP/2 support and
+// connection pooling settings.
+func TestTransportSettings(t *testing.T) {
+	cfg := passthroughCfg("https://example.com")
+	r := NewRegistry(cfg)
+
+	tr, ok := r.http.Transport.(*http.Transport)
+	if !ok {
+		t.Errorf("Transport is not *http.Transport")
+		return
+	}
+
+	// Verify connection pooling settings
+	if tr.MaxIdleConns != 100 {
+		t.Errorf("MaxIdleConns = %d, want 100", tr.MaxIdleConns)
+	}
+	if tr.MaxIdleConnsPerHost != 32 {
+		t.Errorf("MaxIdleConnsPerHost = %d, want 32", tr.MaxIdleConnsPerHost)
+	}
+	if tr.IdleConnTimeout != 90*time.Second {
+		t.Errorf("IdleConnTimeout = %v, want 90s", tr.IdleConnTimeout)
+	}
+
+	// Verify HTTP/2 is enabled (ForceAttemptHTTP2 should be true by default in Clone)
+	if !tr.ForceAttemptHTTP2 {
+		t.Errorf("ForceAttemptHTTP2 = %v, want true", tr.ForceAttemptHTTP2)
+	}
+
+	// Verify redirect checking is in place on the http.Client
+	if r.http.CheckRedirect == nil {
+		t.Errorf("CheckRedirect is nil")
+		return
+	}
+
+	// Verify CheckRedirect rejects all redirects
+	err := r.http.CheckRedirect(nil, nil)
+	if err != http.ErrUseLastResponse {
+		t.Errorf("CheckRedirect returned %v, want http.ErrUseLastResponse", err)
+	}
+}

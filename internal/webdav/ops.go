@@ -159,8 +159,8 @@ func (c *Client) List(ctx context.Context, relDir string, offset, limit int) (*L
 		if !ok {
 			continue
 		}
-		if rel == dir {
-			continue // skip the folder itself
+		if normalizeDir(rel) == dir {
+			continue // skip the folder itself (Nextcloud sends a trailing slash)
 		}
 		if skipped < offset {
 			skipped++
@@ -210,13 +210,19 @@ func (c *Client) Read(ctx context.Context, relPath string, offset, length int64)
 		defer resp.Body.Close()
 		return nil, nil, ncerr.FromStatus(resp.StatusCode, statusText(resp, 512))
 	}
+	if offset > 0 && resp.StatusCode == http.StatusOK {
+		// The body starts at byte 0: returning it would silently yield wrong data.
+		resp.Body.Close()
+		return nil, nil, ncerr.New(ncerr.CodeServerError, "server ignored the Range request (answered 200 instead of 206); cannot read from offset %d", offset)
+	}
 	return resp.Body, resp.Header, nil
 }
 
-// Write uploads content to relPath (overwriting). It creates the parent
+// Write uploads content to relPath. Without overwrite the PUT carries
+// If-None-Match: * so an existing file yields 412, mapped to CodeConflict. It creates the parent
 // folders first: Nextcloud's WebDAV does not create intermediate directories
 // on PUT, so a plain PUT to a missing subfolder would fail with 409/423.
-func (c *Client) Write(ctx context.Context, relPath string, body io.Reader, size int64) error {
+func (c *Client) Write(ctx context.Context, relPath string, body io.Reader, size int64, overwrite bool) error {
 	if err := c.ensureParents(ctx, relPath); err != nil {
 		return err
 	}
@@ -224,11 +230,17 @@ func (c *Client) Write(ctx context.Context, relPath string, body io.Reader, size
 	if size >= 0 {
 		hdr.Set("Content-Length", strconv.FormatInt(size, 10))
 	}
+	if !overwrite {
+		hdr.Set("If-None-Match", "*")
+	}
 	resp, err := c.do(ctx, http.MethodPut, c.URL(relPath), hdr, body)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusPreconditionFailed && !overwrite {
+		return ncerr.New(ncerr.CodeConflict, "file already exists. Pass overwrite=true to replace it (requires the 'destructive' permission level).")
+	}
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
 		return ncerr.FromStatus(resp.StatusCode, statusText(resp, 512))
 	}
@@ -381,47 +393,6 @@ func toRel(href, user string) (string, bool) {
 		return "/", true
 	}
 	return rel, true
-}
-
-// Search finds files/folders whose name contains the (case-insensitive)
-// query. It walks folders breadth-first up to maxDepth levels and stops after
-// limit matches, so it stays cheap on large trees.
-func (c *Client) Search(ctx context.Context, relDir, query string, maxDepth, limit int) (*ListResult, error) {
-	if limit <= 0 || limit > 200 {
-		limit = 50
-	}
-	q := strings.ToLower(query)
-	out := &ListResult{}
-	type item struct {
-		path  string
-		depth int
-	}
-	queue := []item{{relDir, 0}}
-
-	for len(queue) > 0 && len(out.Entries) < limit {
-		cur := queue[0]
-		queue = queue[1:]
-
-		res, err := c.List(ctx, cur.path, 0, 200)
-		if err != nil {
-			if ncerr.Is(err, ncerr.CodeNotFound) || ncerr.Is(err, ncerr.CodeForbidden) {
-				continue
-			}
-			return nil, err
-		}
-		for _, e := range res.Entries {
-			if strings.Contains(strings.ToLower(e.Name), q) {
-				out.Entries = append(out.Entries, e)
-				if len(out.Entries) >= limit {
-					break
-				}
-			}
-			if e.IsDir && cur.depth < maxDepth {
-				queue = append(queue, item{e.Path, cur.depth + 1})
-			}
-		}
-	}
-	return out, nil
 }
 
 func baseName(p string) string {

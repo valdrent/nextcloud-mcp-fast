@@ -27,3 +27,8 @@ coverage.*
 .vscode/
 *.swp
 .DS_Store
+
+# Local SonarQube (not part of the project)
+sonar-project.properties
+sonar.local.sh
+.scannerwork/

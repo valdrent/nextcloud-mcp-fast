@@ -2,6 +2,8 @@ module github.com/valdrent/nextcloud-mcp-fast
 
 go 1.26.0
 
+toolchain go1.26.8
+
 require (
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/modelcontextprotocol/go-sdk v1.8.0
