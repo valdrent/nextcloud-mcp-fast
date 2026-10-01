@@ -1,0 +1,23 @@
+services:
+  nextcloud-mcp-fast:
+    image: ghcr.io/valdrent/nextcloud-mcp-fast:latest
+    build: .
+    container_name: nextcloud-mcp-fast
+    # Keep memory bounded; a typical single-user deployment is comfortable here.
+    mem_limit: 512m
+    cpus: 0.5
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    environment:
+      NEXTCLOUD_HOST: https://cloud.example.com
+      NEXTCLOUD_USERNAME: ${NEXTCLOUD_USERNAME:?set in .env}
+      NEXTCLOUD_PASSWORD: ${NEXTCLOUD_PASSWORD:?App Password, set in .env}
+      NEXTCLOUD_MCP_PERMISSIONS: read
+      # For remote/streamable-HTTP mode instead of stdio:
+      # NEXTCLOUD_MCP_TRANSPORT: http
+      # NEXTCLOUD_MCP_HTTP_ADDR: ":8000"
+      # NEXTCLOUD_MCP_HTTP_TOKEN: ${NEXTCLOUD_MCP_HTTP_TOKEN:?min 32 chars, e.g. openssl rand -hex 32}
+    ports:
+      - "127.0.0.1:8000:8000"

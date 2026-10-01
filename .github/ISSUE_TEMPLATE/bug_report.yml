@@ -1,0 +1,52 @@
+name: Bug report
+description: Report something that does not work as documented.
+labels: [bug, triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Do not report security vulnerabilities here** — see SECURITY.md.
+        Never paste credentials or App Passwords.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `nextcloud-mcp-fast --healthcheck`, or the commit SHA.
+    validations:
+      required: true
+  - type: dropdown
+    id: transport
+    attributes:
+      label: Transport
+      options: [stdio, http]
+    validations:
+      required: true
+  - type: dropdown
+    id: permissions
+    attributes:
+      label: Permission level
+      options: [read, write, destructive]
+    validations:
+      required: true
+  - type: input
+    id: nextcloud
+    attributes:
+      label: Nextcloud server version
+  - type: input
+    id: client
+    attributes:
+      label: MCP client
+      description: e.g. Claude Desktop 1.x, custom SDK client.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Steps to reproduce, expected behavior, and actual behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Remove credentials and personal data before pasting.
+      render: shell

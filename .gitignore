@@ -1,0 +1,29 @@
+# Binaries (make build -> bin/, plain `go build` -> ./nextcloud-mcp-fast)
+/nextcloud-mcp-fast
+/bin/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go
+vendor/
+go.work
+go.work.sum
+coverage.*
+*.coverprofile
+
+# Environment / secrets (keep the template)
+.env
+.env.*
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store

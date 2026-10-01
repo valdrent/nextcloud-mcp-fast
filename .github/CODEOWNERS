@@ -1,0 +1,3 @@
+# Code owners are requested for review automatically on every pull request.
+# Keep this list in sync with MAINTAINERS.md.
+*    @valdrent @fjdevel
