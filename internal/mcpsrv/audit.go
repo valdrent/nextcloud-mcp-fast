@@ -63,6 +63,8 @@ func (s *Server) auditMiddleware(next mcp.MethodHandler) mcp.MethodHandler {
 		switch name {
 		case "write_file", "create_folder", "move_file", "delete":
 			level = slog.LevelInfo
+		default:
+			// Read-only tools are logged at debug level.
 		}
 		s.log.Log(ctx, level, "tool_call", attrs...)
 		return res, err
@@ -94,6 +96,7 @@ func isCode(c string) bool {
 		ncerr.CodePermissionDenied, ncerr.CodeCircuitOpen, ncerr.CodeRateLimited, ncerr.CodeTooLarge,
 		ncerr.CodeUnsupportedType, ncerr.CodeBadRequest, ncerr.CodeConflict, ncerr.CodeServerError, ncerr.CodeTimeout:
 		return true
+	default:
+		return false
 	}
-	return false
 }

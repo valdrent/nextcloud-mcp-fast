@@ -155,10 +155,19 @@ func TestToolsListAndRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CallTool traversal: %v", err)
 	}
+	requirePathForbidden(t, res)
+}
+
+// requirePathForbidden asserts res is a path_forbidden semantic error.
+func requirePathForbidden(t *testing.T, res *mcp.CallToolResult) {
+	t.Helper()
+	body := res.Content[0].(*mcp.TextContent).Text
 	if !res.IsError {
-		t.Errorf("expected traversal to be rejected, got: %s", res.Content[0].(*mcp.TextContent).Text)
-	} else if !strings.Contains(res.Content[0].(*mcp.TextContent).Text, "path_forbidden") {
-		t.Errorf("expected path_forbidden code, got: %s", res.Content[0].(*mcp.TextContent).Text)
+		t.Errorf("expected traversal to be rejected, got: %s", body)
+		return
+	}
+	if !strings.Contains(body, "path_forbidden") {
+		t.Errorf("expected path_forbidden code, got: %s", body)
 	}
 }
 

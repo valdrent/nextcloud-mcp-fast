@@ -66,10 +66,11 @@ func (v *NextcloudVerifier) Verify(ctx context.Context, token string, _ *http.Re
 		return nil, fmt.Errorf("nextcloud token check: %w", err)
 	}
 	defer resp.Body.Close()
-	switch {
-	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusFound:
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusFound:
 		return nil, fmt.Errorf("%w: rejected by Nextcloud", auth.ErrInvalidToken)
-	case resp.StatusCode != http.StatusOK:
+	default:
 		return nil, fmt.Errorf("nextcloud token check: status %d", resp.StatusCode)
 	}
 	var body struct {

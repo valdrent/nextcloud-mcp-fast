@@ -62,6 +62,25 @@ type readArgs struct {
 	Encoding string `json:"encoding,omitempty" jsonschema:"'text' (default) or 'base64' for binary"`
 }
 
+// rangeTotal extracts the total size from a Content-Range header
+// ("bytes start-end/total"), or -1 when absent or unknown.
+func rangeTotal(cr string) int64 {
+	total := int64(-1)
+	if i := strings.Index(cr, "/"); i >= 0 {
+		if _, err := fmt.Sscanf(cr[i+1:], "%d", &total); err != nil {
+			return -1
+		}
+	}
+	return total
+}
+
+func binaryFileError(contentType string, n int) error {
+	if contentType != "" {
+		contentType += ", "
+	}
+	return ncerr.New(ncerr.CodeUnsupportedType, "file looks binary (%s%d bytes); re-read with encoding=base64 if you really need the raw bytes", contentType, n)
+}
+
 func (s *Server) handleRead(ctx context.Context, req *mcp.CallToolRequest, a readArgs) (*mcp.CallToolResult, any, error) {
 	if a.Offset < 0 || a.Length < 0 {
 		return nil, nil, ncerr.New(ncerr.CodeBadRequest, "offset and length must not be negative")
@@ -71,10 +90,7 @@ func (s *Server) handleRead(ctx context.Context, req *mcp.CallToolRequest, a rea
 		return nil, nil, err
 	}
 	length := a.Length
-	if length <= 0 {
-		length = s.cfg.MaxReadBytes
-	}
-	if length > s.cfg.MaxReadBytes {
+	if length <= 0 || length > s.cfg.MaxReadBytes {
 		length = s.cfg.MaxReadBytes
 	}
 
@@ -93,13 +109,7 @@ func (s *Server) handleRead(ctx context.Context, req *mcp.CallToolRequest, a rea
 	}
 	s.recordOutcome(req, nil, nil)
 
-	total := int64(-1)
-	if cr := hdr.Get("Content-Range"); cr != "" {
-		// form: bytes start-end/total
-		if i := strings.Index(cr, "/"); i >= 0 {
-			fmt.Sscanf(cr[i+1:], "%d", &total)
-		}
-	}
+	total := rangeTotal(hdr.Get("Content-Range"))
 
 	if int64(len(data)) > length {
 		data = data[:length] // server ignored the range; honor the cap
@@ -112,11 +122,7 @@ func (s *Server) handleRead(ctx context.Context, req *mcp.CallToolRequest, a rea
 	} else {
 		text, ok := textPrefix(data, truncated)
 		if !ok {
-			ct := hdr.Get("Content-Type")
-			if ct != "" {
-				ct += ", "
-			}
-			return nil, nil, ncerr.New(ncerr.CodeUnsupportedType, "file looks binary (%s%d bytes); re-read with encoding=base64 if you really need the raw bytes", ct, len(data))
+			return nil, nil, binaryFileError(hdr.Get("Content-Type"), len(data))
 		}
 		data = text
 		out["encoding"] = "text"

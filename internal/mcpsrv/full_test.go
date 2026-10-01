@@ -40,169 +40,198 @@ func (m *statefulMock) handler(w http.ResponseWriter, r *http.Request) {
 	p := r.URL.Path
 	switch r.Method {
 	case "PROPFIND":
-		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
-		var b strings.Builder
-		b.WriteString(`<?xml version="1.0"?><D:multistatus xmlns:D="DAV:">`)
-		if depth := r.Header.Get("Depth"); depth == "0" {
-			if _, ok := m.files[p]; ok {
-				content := m.files[p]
-				b.WriteString(`<D:response><D:href>` + p + `</D:href>
-<D:propstat><D:prop><D:resourcetype/>
-<D:getcontentlength>` + itoa(len(content)) + `</D:getcontentlength>
-<D:getlastmodified>Wed, 01 Jan 2026 00:00:00 GMT</D:getlastmodified>
-<D:getcontenttype>text/plain</D:getcontenttype></D:prop></D:propstat></D:response>`)
-			} else if m.folders[p] {
-				b.WriteString(`<D:response><D:href>` + p + `</D:href>
-<D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop></D:propstat></D:response>`)
-			} else {
-				w.WriteHeader(http.StatusNotFound)
-				return
-			}
-		} else {
-			// depth 1: the folder itself plus its direct children
-			if !m.folders[p] {
-				w.WriteHeader(http.StatusNotFound)
-				return
-			}
-			b.WriteString(`<D:response><D:href>` + p + `</D:href>
-<D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop></D:propstat></D:response>`)
-			// sorted so paginated listings are stable across requests
-			fps := make([]string, 0, len(m.files))
-			for fp := range m.files {
-				fps = append(fps, fp)
-			}
-			sort.Strings(fps)
-			for _, fp := range fps {
-				if parentOf(fp) == p {
-					b.WriteString(`<D:response><D:href>` + fp + `</D:href>
-<D:propstat><D:prop><D:resourcetype/>
-<D:getcontentlength>` + itoa(len(m.files[fp])) + `</D:getcontentlength>
-<D:getlastmodified>Wed, 01 Jan 2026 00:00:00 GMT</D:getlastmodified>
-<D:getcontenttype>text/plain</D:getcontenttype></D:prop></D:propstat></D:response>`)
-				}
-			}
-			for f := range m.folders {
-				if parentOf(f) == p {
-					b.WriteString(`<D:response><D:href>` + f + `</D:href>
-<D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop></D:propstat></D:response>`)
-				}
-			}
-		}
-		b.WriteString(`</D:multistatus>`)
-		w.WriteHeader(http.StatusMultiStatus)
-		io.WriteString(w, b.String())
+		m.propfind(w, r, p)
 	case "MKCOL":
-		if m.folders[p] {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		if !m.folders[parentOf(p)] {
-			w.WriteHeader(http.StatusConflict)
-			return
-		}
-		m.folders[p] = true
-		w.WriteHeader(http.StatusCreated)
+		m.mkcol(w, p)
 	case http.MethodPut:
-		if !m.folders[parentOf(p)] {
-			w.WriteHeader(http.StatusConflict)
-			return
-		}
-		if _, exists := m.files[p]; exists && r.Header.Get("If-None-Match") == "*" {
-			w.WriteHeader(http.StatusPreconditionFailed)
-			return
-		}
-		body := make([]byte, 0)
-		buf := make([]byte, 4096)
-		for {
-			n, _ := r.Body.Read(buf)
-			if n == 0 {
-				break
-			}
-			body = append(body, buf[:n]...)
-		}
-		m.files[p] = string(body)
-		w.WriteHeader(http.StatusCreated)
+		m.put(w, r, p)
 	case http.MethodGet:
-		content, ok := m.files[p]
-		if !ok {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		if rng := r.Header.Get("Range"); rng != "" {
-			start := 0
-			end := len(content) - 1
-			if strings.HasPrefix(rng, "bytes=") {
-				spec := strings.TrimPrefix(rng, "bytes=")
-				if i := strings.IndexByte(spec, '-'); i >= 0 {
-					start, _ = strconv.Atoi(spec[:i])
-					if spec[i+1:] != "" {
-						end, _ = strconv.Atoi(spec[i+1:])
-					}
-				}
-			}
-			if start > end || start >= len(content) {
-				w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
-				return
-			}
-			if end >= len(content) {
-				end = len(content) - 1
-			}
-			w.Header().Set("Content-Range", "bytes "+itoa(start)+"-"+itoa(end)+"/"+itoa(len(content)))
-			w.WriteHeader(http.StatusPartialContent)
-			w.Write([]byte(content[start : end+1]))
-			return
-		}
-		w.Header().Set("Content-Length", itoa(len(content)))
-		w.Write([]byte(content))
+		m.get(w, r, p)
 	case "MOVE":
-		dst := strings.TrimPrefix(r.Header.Get("Destination"), m.baseURL)
-		if !strings.HasPrefix(dst, "/remote.php/dav/files/") {
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		src := p
-		content, ok := m.files[src]
-		if !ok && !m.folders[src] {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		if _, exists := m.files[dst]; exists && r.Header.Get("Overwrite") == "F" {
-			w.WriteHeader(http.StatusPreconditionFailed)
-			return
-		}
-		if ok {
-			m.files[dst] = content
-			delete(m.files, src)
-		} else {
-			m.folders[dst] = true
-			delete(m.folders, src)
-		}
-		w.WriteHeader(http.StatusCreated)
+		m.move(w, r, p)
 	case http.MethodDelete:
-		if _, ok := m.files[p]; ok {
-			delete(m.files, p)
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		if m.folders[p] {
-			for fp := range m.files {
-				if strings.HasPrefix(fp, p+"/") {
-					delete(m.files, fp)
-				}
-			}
-			for f := range m.folders {
-				if strings.HasPrefix(f, p+"/") {
-					delete(m.folders, f)
-				}
-			}
-			delete(m.folders, p)
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		w.WriteHeader(http.StatusNotFound)
+		m.del(w, p)
 	default:
 		http.Error(w, "unexpected "+r.Method, http.StatusMethodNotAllowed)
 	}
+}
+
+const (
+	xmlFileProps = `<D:resourcetype/>
+<D:getcontentlength>%d</D:getcontentlength>
+<D:getlastmodified>Wed, 01 Jan 2026 00:00:00 GMT</D:getlastmodified>
+<D:getcontenttype>text/plain</D:getcontenttype>`
+	xmlDirProps = `<D:resourcetype><D:collection/></D:resourcetype>`
+)
+
+func (m *statefulMock) fileXML(href, content string) string {
+	return `<D:response><D:href>` + href + `</D:href><D:propstat><D:prop>` +
+		fmt.Sprintf(xmlFileProps, len(content)) + `</D:prop></D:propstat></D:response>`
+}
+
+func dirXML(href string) string {
+	return `<D:response><D:href>` + href + `</D:href><D:propstat><D:prop>` + xmlDirProps + `</D:prop></D:propstat></D:response>`
+}
+
+// propfindBody renders the multistatus body for p, or ok=false when p is unknown.
+func (m *statefulMock) propfindBody(p, depth string) (string, bool) {
+	if depth == "0" {
+		if content, ok := m.files[p]; ok {
+			return m.fileXML(p, content), true
+		}
+		return dirXML(p), m.folders[p]
+	}
+	// depth 1: the folder itself plus its direct children
+	if !m.folders[p] {
+		return "", false
+	}
+	var b strings.Builder
+	b.WriteString(dirXML(p))
+	// sorted so paginated listings are stable across requests
+	fps := make([]string, 0, len(m.files))
+	for fp := range m.files {
+		fps = append(fps, fp)
+	}
+	sort.Strings(fps)
+	for _, fp := range fps {
+		if parentOf(fp) == p {
+			b.WriteString(m.fileXML(fp, m.files[fp]))
+		}
+	}
+	for f := range m.folders {
+		if parentOf(f) == p {
+			b.WriteString(dirXML(f))
+		}
+	}
+	return b.String(), true
+}
+
+func (m *statefulMock) propfind(w http.ResponseWriter, r *http.Request, p string) {
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	body, ok := m.propfindBody(p, r.Header.Get("Depth"))
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusMultiStatus)
+	io.WriteString(w, `<?xml version="1.0"?><D:multistatus xmlns:D="DAV:">`+body+`</D:multistatus>`)
+}
+
+// parseByteRange parses "bytes=start-end" (end optional) for a body of n bytes.
+func parseByteRange(rng string, n int) (start, end int) {
+	end = n - 1
+	spec, found := strings.CutPrefix(rng, "bytes=")
+	if !found {
+		return start, end
+	}
+	if i := strings.IndexByte(spec, '-'); i >= 0 {
+		start, _ = strconv.Atoi(spec[:i])
+		if spec[i+1:] != "" {
+			end, _ = strconv.Atoi(spec[i+1:])
+		}
+	}
+	return start, end
+}
+
+func (m *statefulMock) mkcol(w http.ResponseWriter, p string) {
+	if m.folders[p] {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if !m.folders[parentOf(p)] {
+		w.WriteHeader(http.StatusConflict)
+		return
+	}
+	m.folders[p] = true
+	w.WriteHeader(http.StatusCreated)
+}
+
+func (m *statefulMock) put(w http.ResponseWriter, r *http.Request, p string) {
+	if !m.folders[parentOf(p)] {
+		w.WriteHeader(http.StatusConflict)
+		return
+	}
+	if _, exists := m.files[p]; exists && r.Header.Get("If-None-Match") == "*" {
+		w.WriteHeader(http.StatusPreconditionFailed)
+		return
+	}
+	body, _ := io.ReadAll(r.Body)
+	m.files[p] = string(body)
+	w.WriteHeader(http.StatusCreated)
+}
+
+func (m *statefulMock) get(w http.ResponseWriter, r *http.Request, p string) {
+	content, ok := m.files[p]
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	if rng := r.Header.Get("Range"); rng != "" {
+		start, end := parseByteRange(rng, len(content))
+		if start > end || start >= len(content) {
+			w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+		if end >= len(content) {
+			end = len(content) - 1
+		}
+		w.Header().Set("Content-Range", "bytes "+itoa(start)+"-"+itoa(end)+"/"+itoa(len(content)))
+		w.WriteHeader(http.StatusPartialContent)
+		w.Write([]byte(content[start : end+1]))
+		return
+	}
+	w.Header().Set("Content-Length", itoa(len(content)))
+	w.Write([]byte(content))
+}
+
+func (m *statefulMock) move(w http.ResponseWriter, r *http.Request, p string) {
+	dst := strings.TrimPrefix(r.Header.Get("Destination"), m.baseURL)
+	if !strings.HasPrefix(dst, "/remote.php/dav/files/") {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	src := p
+	content, ok := m.files[src]
+	if !ok && !m.folders[src] {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	if _, exists := m.files[dst]; exists && r.Header.Get("Overwrite") == "F" {
+		w.WriteHeader(http.StatusPreconditionFailed)
+		return
+	}
+	if ok {
+		m.files[dst] = content
+		delete(m.files, src)
+	} else {
+		m.folders[dst] = true
+		delete(m.folders, src)
+	}
+	w.WriteHeader(http.StatusCreated)
+}
+
+func (m *statefulMock) del(w http.ResponseWriter, p string) {
+	if _, ok := m.files[p]; ok {
+		delete(m.files, p)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if m.folders[p] {
+		for fp := range m.files {
+			if strings.HasPrefix(fp, p+"/") {
+				delete(m.files, fp)
+			}
+		}
+		for f := range m.folders {
+			if strings.HasPrefix(f, p+"/") {
+				delete(m.folders, f)
+			}
+		}
+		delete(m.folders, p)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	w.WriteHeader(http.StatusNotFound)
 }
 
 func parentOf(p string) string {
@@ -262,50 +291,75 @@ func callText(t *testing.T, cs *mcp.ClientSession, name string, args map[string]
 	return text, res.IsError
 }
 
+// mustCall calls a tool and fails the test if it returns a tool error.
+func mustCall(t *testing.T, cs *mcp.ClientSession, tool string, args map[string]any) string {
+	t.Helper()
+	text, isErr := callText(t, cs, tool, args)
+	if isErr {
+		t.Fatalf("%s failed: %s", tool, text)
+	}
+	return text
+}
+
+// mustFailWith calls a tool and requires a tool error containing code.
+func mustFailWith(t *testing.T, cs *mcp.ClientSession, tool string, args map[string]any, code string) {
+	t.Helper()
+	text, isErr := callText(t, cs, tool, args)
+	if !isErr {
+		t.Fatalf("%s should fail, got: %s", tool, text)
+	}
+	if !strings.Contains(text, code) {
+		t.Errorf("%s: expected %s code, got: %s", tool, code, text)
+	}
+}
+
+// decodeJSON unmarshals a tool result into v or fails the test.
+func decodeJSON(t *testing.T, text string, v any) {
+	t.Helper()
+	if err := json.Unmarshal([]byte(text), v); err != nil {
+		t.Fatalf("result not JSON: %s", text)
+	}
+}
+
 func TestFullLifecycle(t *testing.T) {
 	m := newStatefulMock()
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		m.handler(w, r)
-	}))
+	ts := httptest.NewServer(http.HandlerFunc(m.handler))
 	defer ts.Close()
 	m.baseURL = ts.URL
 
 	cs, done := newFullTestServer(t, ts.URL, "destructive")
 	defer done()
 
-	// 1. write to a nested path that does not exist yet: parents are created.
-	text, isErr := callText(t, cs, "write_file", map[string]any{
-		"path": "/a/b/nested.txt", "content": "hello nested",
-	})
-	if isErr {
-		t.Fatalf("write_file failed: %s", text)
-	}
+	lifecycleWriteAndStat(t, cs)
+	lifecycleListReadSearch(t, cs)
+	lifecycleMoveAndFolders(t, cs)
+	lifecycleDelete(t, cs)
+}
+
+// write to a nested path that does not exist yet (parents are created), then
+// stat the new file: size and type must be correct.
+func lifecycleWriteAndStat(t *testing.T, cs *mcp.ClientSession) {
+	t.Helper()
+	text := mustCall(t, cs, "write_file", map[string]any{"path": nestedPath, "content": "hello nested"})
 	if !strings.Contains(text, "12 bytes") {
 		t.Errorf("write_file result = %q, want 12 bytes", text)
 	}
 
-	// 2. stat the new file: size and type must be correct.
-	text, isErr = callText(t, cs, "stat", map[string]any{"path": "/a/b/nested.txt"})
-	if isErr {
-		t.Fatalf("stat failed: %s", text)
-	}
 	var st struct {
 		Size  int64  `json:"size"`
 		IsDir bool   `json:"isDir"`
 		Path  string `json:"path"`
 	}
-	if err := json.Unmarshal([]byte(text), &st); err != nil {
-		t.Fatalf("stat not JSON: %s", text)
-	}
+	decodeJSON(t, mustCall(t, cs, "stat", map[string]any{"path": nestedPath}), &st)
 	if st.Size != 12 || st.IsDir {
 		t.Errorf("stat = %+v, want size 12, isDir false", st)
 	}
+}
 
-	// 3. list the parent folder: entry must be a file with correct size.
-	text, isErr = callText(t, cs, "list_files", map[string]any{"path": "/a/b"})
-	if isErr {
-		t.Fatalf("list_files failed: %s", text)
-	}
+// list the parent folder, read back with offset/length (Range request path)
+// and search by name substring.
+func lifecycleListReadSearch(t *testing.T, cs *mcp.ClientSession) {
+	t.Helper()
 	var list struct {
 		Count   int `json:"count"`
 		Entries []struct {
@@ -314,9 +368,7 @@ func TestFullLifecycle(t *testing.T) {
 			Size int64  `json:"size"`
 		} `json:"entries"`
 	}
-	if err := json.Unmarshal([]byte(text), &list); err != nil {
-		t.Fatalf("list not JSON: %s", text)
-	}
+	decodeJSON(t, mustCall(t, cs, "list_files", map[string]any{"path": "/a/b"}), &list)
 	if list.Count != 1 || len(list.Entries) != 1 {
 		t.Fatalf("list = %+v, want 1 entry", list)
 	}
@@ -324,104 +376,59 @@ func TestFullLifecycle(t *testing.T) {
 		t.Errorf("entry = %+v, want file size 12", list.Entries[0])
 	}
 
-	// 4. read back with offset/length (Range request path).
-	text, isErr = callText(t, cs, "read_file", map[string]any{
-		"path": "/a/b/nested.txt", "offset": 6, "length": 6,
-	})
-	if isErr {
-		t.Fatalf("read_file range failed: %s", text)
-	}
 	var rd struct {
 		Content   string `json:"content"`
 		Encoding  string `json:"encoding"`
 		Truncated bool   `json:"truncated"`
 	}
-	if err := json.Unmarshal([]byte(text), &rd); err != nil {
-		t.Fatalf("read not JSON: %s", text)
-	}
+	decodeJSON(t, mustCall(t, cs, "read_file", map[string]any{"path": nestedPath, "offset": 6, "length": 6}), &rd)
 	if rd.Content != "nested" || rd.Encoding != "text" {
 		t.Errorf("read = %+v, want content \"nested\" text", rd)
 	}
 
-	// 5. search finds the file by name substring.
-	text, isErr = callText(t, cs, "search_files", map[string]any{"query": "nested"})
-	if isErr {
-		t.Fatalf("search failed: %s", text)
-	}
 	var sr struct {
 		Count int `json:"count"`
 	}
-	if err := json.Unmarshal([]byte(text), &sr); err != nil {
-		t.Fatalf("search not JSON: %s", text)
-	}
+	text := mustCall(t, cs, "search_files", map[string]any{"query": "nested"})
+	decodeJSON(t, text, &sr)
 	if sr.Count != 1 {
 		t.Errorf("search count = %d, want 1 (%s)", sr.Count, text)
 	}
+}
 
-	// 6. move without overwrite onto an existing destination -> conflict.
-	callText(t, cs, "write_file", map[string]any{"path": "/a/b/target.txt", "content": "target"})
-	text, isErr = callText(t, cs, "move_file", map[string]any{
-		"from": "/a/b/nested.txt", "to": "/a/b/target.txt", "overwrite": false,
-	})
-	if !isErr {
-		t.Fatalf("move onto existing dest should fail, got: %s", text)
-	}
-	if !strings.Contains(text, "conflict") {
-		t.Errorf("expected conflict code, got: %s", text)
-	}
+// move without overwrite onto an existing destination conflicts; with
+// overwrite it succeeds and the source is gone; create_folder on an existing
+// folder conflicts.
+func lifecycleMoveAndFolders(t *testing.T, cs *mcp.ClientSession) {
+	t.Helper()
+	mustCall(t, cs, "write_file", map[string]any{"path": targetPath, "content": "target"})
+	mustFailWith(t, cs, "move_file", map[string]any{"from": nestedPath, "to": targetPath, "overwrite": false}, "conflict")
 
-	// 7. move with overwrite succeeds and the source is gone.
-	text, isErr = callText(t, cs, "move_file", map[string]any{
-		"from": "/a/b/nested.txt", "to": "/a/b/target.txt", "overwrite": true,
-	})
-	if isErr {
-		t.Fatalf("move overwrite failed: %s", text)
-	}
-	_, isErr = callText(t, cs, "stat", map[string]any{"path": "/a/b/nested.txt"})
-	if !isErr {
+	mustCall(t, cs, "move_file", map[string]any{"from": nestedPath, "to": targetPath, "overwrite": true})
+	if _, isErr := callText(t, cs, "stat", map[string]any{"path": nestedPath}); !isErr {
 		t.Errorf("stat on moved source should fail")
 	}
 
-	// 8. create_folder on an existing folder -> conflict.
-	text, isErr = callText(t, cs, "create_folder", map[string]any{"path": "/a/b"})
-	if !isErr {
-		t.Fatalf("create_folder on existing dir should fail, got: %s", text)
-	}
-	if !strings.Contains(text, "conflict") {
-		t.Errorf("expected conflict code, got: %s", text)
-	}
+	mustFailWith(t, cs, "create_folder", map[string]any{"path": "/a/b"}, "conflict")
+}
 
-	// 9. delete the file, then the folder tree; final list of root is empty.
-	text, isErr = callText(t, cs, "delete", map[string]any{"path": "/a/b/target.txt"})
-	if isErr {
-		t.Fatalf("delete failed: %s", text)
-	}
-	text, isErr = callText(t, cs, "delete", map[string]any{"path": "/a"})
-	if isErr {
-		t.Fatalf("delete folder failed: %s", text)
-	}
-	text, isErr = callText(t, cs, "list_files", map[string]any{"path": "/"})
-	if isErr {
-		t.Fatalf("final list failed: %s", text)
-	}
+// delete the file, then the folder tree; the root listing ends empty and a
+// stat on a missing path is a clean not_found.
+func lifecycleDelete(t *testing.T, cs *mcp.ClientSession) {
+	t.Helper()
+	mustCall(t, cs, "delete", map[string]any{"path": targetPath})
+	mustCall(t, cs, "delete", map[string]any{"path": "/a"})
+
 	var fl struct {
 		Count int `json:"count"`
 	}
-	if err := json.Unmarshal([]byte(text), &fl); err != nil {
-		t.Fatalf("final list not JSON: %s", text)
-	}
+	text := mustCall(t, cs, "list_files", map[string]any{"path": "/"})
+	decodeJSON(t, text, &fl)
 	if fl.Count != 0 {
 		t.Errorf("final root count = %d, want 0 (%s)", fl.Count, text)
 	}
 
-	// 10. stat on a missing path -> not_found with a clean message.
-	text, isErr = callText(t, cs, "stat", map[string]any{"path": "/a/b/gone.txt"})
-	if !isErr {
-		t.Fatalf("stat on missing should fail, got: %s", text)
-	}
-	if !strings.Contains(text, "not_found") {
-		t.Errorf("expected not_found code, got: %s", text)
-	}
+	mustFailWith(t, cs, "stat", map[string]any{"path": "/a/b/gone.txt"}, "not_found")
 }
 
 func TestListPaginationWalksAll(t *testing.T) {
@@ -540,3 +547,8 @@ func TestInstructionsUntrusted(t *testing.T) {
 		t.Errorf("instructions missing untrusted sentence: %q", ins)
 	}
 }
+
+const (
+	nestedPath = "/a/b/nested.txt"
+	targetPath = "/a/b/target.txt"
+)

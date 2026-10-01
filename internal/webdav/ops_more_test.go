@@ -34,7 +34,7 @@ func TestWriteCreatesParentFolders(t *testing.T) {
 
 	c, err := NewClient(&Credentials{Host: ts.URL, Username: "alice", Password: "p"}, &http.Client{})
 	if err != nil {
-		t.Fatalf("NewClient: %v", err)
+		t.Fatalf(errNewClientFmt, err)
 	}
 	err = c.Write(context.Background(), "/sub/deep/nested.txt", strings.NewReader("x"), 1, true)
 	if err != nil {
@@ -67,7 +67,7 @@ func TestWriteSkipsExistingParents(t *testing.T) {
 
 	c, err := NewClient(&Credentials{Host: ts.URL, Username: "alice", Password: "p"}, &http.Client{})
 	if err != nil {
-		t.Fatalf("NewClient: %v", err)
+		t.Fatalf(errNewClientFmt, err)
 	}
 	err = c.Write(context.Background(), "/sub/nested.txt", strings.NewReader("x"), 1, true)
 	if err != nil {
@@ -89,7 +89,7 @@ func TestReadRangeHeader(t *testing.T) {
 
 	c, err := NewClient(&Credentials{Host: ts.URL, Username: "alice", Password: "p"}, &http.Client{})
 	if err != nil {
-		t.Fatalf("NewClient: %v", err)
+		t.Fatalf(errNewClientFmt, err)
 	}
 	body, _, err := c.Read(context.Background(), "/docs/a.txt", 2, 3)
 	if err != nil {
@@ -117,7 +117,7 @@ func TestReadSuffixRange(t *testing.T) {
 
 	c, err := NewClient(&Credentials{Host: ts.URL, Username: "alice", Password: "p"}, &http.Client{})
 	if err != nil {
-		t.Fatalf("NewClient: %v", err)
+		t.Fatalf(errNewClientFmt, err)
 	}
 	body, _, err := c.Read(context.Background(), "/docs/a.txt", 10, 0)
 	if err != nil {
@@ -135,11 +135,11 @@ func TestReadRangeIgnoredIsError(t *testing.T) {
 	}))
 	defer ts.Close()
 	c, _ := NewClient(&Credentials{Host: ts.URL, Username: "alice", Password: "p"}, &http.Client{})
-	if _, _, err := c.Read(context.Background(), "/f.txt", 5, 3); !ncerr.Is(err, ncerr.CodeServerError) {
+	if _, _, err := c.Read(context.Background(), fileTxt, 5, 3); !ncerr.Is(err, ncerr.CodeServerError) {
 		t.Fatalf("want server_error, got %v", err)
 	}
 	// offset 0 with a 200 is fine.
-	body, _, err := c.Read(context.Background(), "/f.txt", 0, 3)
+	body, _, err := c.Read(context.Background(), fileTxt, 0, 3)
 	if err != nil {
 		t.Fatalf("offset 0: %v", err)
 	}
@@ -158,14 +158,16 @@ func TestWriteIfNoneMatch(t *testing.T) {
 	}))
 	defer ts.Close()
 	c, _ := NewClient(&Credentials{Host: ts.URL, Username: "alice", Password: "p"}, &http.Client{})
-	err := c.Write(context.Background(), "/f.txt", strings.NewReader("x"), 1, false)
+	err := c.Write(context.Background(), fileTxt, strings.NewReader("x"), 1, false)
 	if !ncerr.Is(err, ncerr.CodeConflict) || !strings.Contains(err.Error(), "overwrite=true") {
 		t.Fatalf("want actionable conflict, got %v", err)
 	}
-	if err := c.Write(context.Background(), "/f.txt", strings.NewReader("x"), 1, true); err != nil {
+	if err := c.Write(context.Background(), fileTxt, strings.NewReader("x"), 1, true); err != nil {
 		t.Fatalf("overwrite: %v", err)
 	}
 	if inm[0] != "*" || inm[1] != "" {
 		t.Errorf("If-None-Match = %q", inm)
 	}
 }
+
+const fileTxt = "/f.txt"

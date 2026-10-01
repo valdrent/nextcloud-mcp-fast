@@ -87,41 +87,11 @@ func (v *OIDCVerifier) Verify(ctx context.Context, token string, _ *http.Request
 		return nil, fmt.Errorf("%w: signature mismatch", auth.ErrInvalidToken)
 	}
 
-	var c struct {
-		Iss   string          `json:"iss"`
-		Sub   string          `json:"sub"`
-		Aud   json.RawMessage `json:"aud"`
-		Exp   float64         `json:"exp"`
-		Nbf   float64         `json:"nbf"`
-		Scope string          `json:"scope"`
-		Scp   json.RawMessage `json:"scp"`
-		Email string          `json:"email"`
-		Pref  string          `json:"preferred_username"`
-	}
-	if err := decodeSegment(parts[1], &c); err != nil {
-		return nil, fmt.Errorf("%w: bad claims", auth.ErrInvalidToken)
-	}
-	if c.Iss != v.issuer {
-		return nil, fmt.Errorf("%w: wrong issuer", auth.ErrInvalidToken)
-	}
-	if !audContains(c.Aud, v.audience) {
-		return nil, fmt.Errorf("%w: wrong audience", auth.ErrInvalidToken)
-	}
-	now := time.Now()
-	if c.Exp == 0 {
-		return nil, fmt.Errorf("%w: missing exp", auth.ErrInvalidToken)
+	c, err := v.parseClaims(parts[1])
+	if err != nil {
+		return nil, err
 	}
 	exp := time.Unix(int64(c.Exp), 0)
-	if now.After(exp.Add(clockSkew)) {
-		return nil, fmt.Errorf("%w: token expired", auth.ErrInvalidToken)
-	}
-	if c.Nbf != 0 && now.Add(clockSkew).Before(time.Unix(int64(c.Nbf), 0)) {
-		return nil, fmt.Errorf("%w: token not yet valid", auth.ErrInvalidToken)
-	}
-	if c.Sub == "" {
-		return nil, fmt.Errorf("%w: missing sub", auth.ErrInvalidToken)
-	}
-
 	scopes := strings.Fields(c.Scope)
 	if len(c.Scp) > 0 {
 		var arr []string
@@ -135,6 +105,47 @@ func (v *OIDCVerifier) Verify(ctx context.Context, token string, _ *http.Request
 		Expiration: exp,
 		Extra:      map[string]any{"email": c.Email, "preferred_username": c.Pref},
 	}, nil
+}
+
+type jwtClaims struct {
+	Iss   string          `json:"iss"`
+	Sub   string          `json:"sub"`
+	Aud   json.RawMessage `json:"aud"`
+	Exp   float64         `json:"exp"`
+	Nbf   float64         `json:"nbf"`
+	Scope string          `json:"scope"`
+	Scp   json.RawMessage `json:"scp"`
+	Email string          `json:"email"`
+	Pref  string          `json:"preferred_username"`
+}
+
+// parseClaims decodes the payload segment and validates issuer, audience,
+// time bounds and subject.
+func (v *OIDCVerifier) parseClaims(seg string) (*jwtClaims, error) {
+	var c jwtClaims
+	if err := decodeSegment(seg, &c); err != nil {
+		return nil, fmt.Errorf("%w: bad claims", auth.ErrInvalidToken)
+	}
+	if c.Iss != v.issuer {
+		return nil, fmt.Errorf("%w: wrong issuer", auth.ErrInvalidToken)
+	}
+	if !audContains(c.Aud, v.audience) {
+		return nil, fmt.Errorf("%w: wrong audience", auth.ErrInvalidToken)
+	}
+	if c.Exp == 0 {
+		return nil, fmt.Errorf("%w: missing exp", auth.ErrInvalidToken)
+	}
+	now := time.Now()
+	if now.After(time.Unix(int64(c.Exp), 0).Add(clockSkew)) {
+		return nil, fmt.Errorf("%w: token expired", auth.ErrInvalidToken)
+	}
+	if c.Nbf != 0 && now.Add(clockSkew).Before(time.Unix(int64(c.Nbf), 0)) {
+		return nil, fmt.Errorf("%w: token not yet valid", auth.ErrInvalidToken)
+	}
+	if c.Sub == "" {
+		return nil, fmt.Errorf("%w: missing sub", auth.ErrInvalidToken)
+	}
+	return &c, nil
 }
 
 func decodeSegment(seg string, out any) error {
@@ -180,8 +191,9 @@ func verifySig(alg string, key crypto.PublicKey, digest, sig []byte) error {
 			return errors.New("bad signature")
 		}
 		return nil
+	default:
+		return errors.New("unsupported alg")
 	}
-	return errors.New("unsupported alg")
 }
 
 // key returns the signing key for kid, refreshing the JWKS when the cache is
@@ -251,26 +263,7 @@ func (v *OIDCVerifier) refresh(ctx context.Context) error {
 		if k.Use != "" && k.Use != "sig" {
 			continue
 		}
-		switch k.Kty {
-		case "RSA":
-			n, e := b64Int(k.N), b64Int(k.E)
-			if n == nil || e == nil || !e.IsInt64() || n.BitLen() < 2048 {
-				continue
-			}
-			keys[k.Kid] = &rsa.PublicKey{N: n, E: int(e.Int64())}
-		case "EC":
-			x, y := b64Int(k.X), b64Int(k.Y)
-			if k.Crv != "P-256" || x == nil || y == nil || x.BitLen() > 256 || y.BitLen() > 256 {
-				continue
-			}
-			point := make([]byte, 65)
-			point[0] = 0x04
-			x.FillBytes(point[1:33])
-			y.FillBytes(point[33:])
-			pub, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), point)
-			if err != nil {
-				continue
-			}
+		if pub := parseJWK(k.Kty, k.N, k.E, k.Crv, k.X, k.Y); pub != nil {
 			keys[k.Kid] = pub
 		}
 	}
@@ -279,6 +272,46 @@ func (v *OIDCVerifier) refresh(ctx context.Context) error {
 	}
 	v.keys, v.fetchedAt = keys, time.Now()
 	return nil
+}
+
+// parseJWK builds a public key from JWK fields, or returns nil when the key is
+// of an unsupported type or fails the minimum-strength checks.
+func parseJWK(kty, n, e, crv, x, y string) crypto.PublicKey {
+	switch kty {
+	case "RSA":
+		return parseRSAJWK(n, e)
+	case "EC":
+		return parseECJWK(crv, x, y)
+	default:
+		return nil
+	}
+}
+
+func parseRSAJWK(n, e string) crypto.PublicKey {
+	bn, be := b64Int(n), b64Int(e)
+	if bn == nil || be == nil || !be.IsInt64() || bn.BitLen() < 2048 {
+		return nil
+	}
+	return &rsa.PublicKey{N: bn, E: int(be.Int64())}
+}
+
+func parseECJWK(crv, x, y string) crypto.PublicKey {
+	bx, by := b64Int(x), b64Int(y)
+	if crv != "P-256" || bx == nil || by == nil {
+		return nil
+	}
+	if bx.BitLen() > 256 || by.BitLen() > 256 {
+		return nil
+	}
+	point := make([]byte, 65)
+	point[0] = 0x04
+	bx.FillBytes(point[1:33])
+	by.FillBytes(point[33:])
+	pub, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), point)
+	if err != nil {
+		return nil
+	}
+	return pub
 }
 
 func b64Int(s string) *big.Int {

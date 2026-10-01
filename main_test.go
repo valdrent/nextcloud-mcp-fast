@@ -25,7 +25,7 @@ func TestRequireBearer(t *testing.T) {
 		{"no header", "", 401},
 		{"wrong token", "Bearer nope", 401},
 		{"wrong scheme", "Basic " + tok, 401},
-		{"bearer", "Bearer " + tok, 200},
+		{"bearer", bearerPrefix + tok, 200},
 		{"lowercase bearer", "bearer " + tok, 200},
 	}
 	for _, tc := range cases {
@@ -80,7 +80,7 @@ func TestHTTPServerHardening(t *testing.T) {
 	// Test stateless mode: GET with valid bearer should return 405
 	// (In stateless mode, GET and DELETE are not allowed)
 	req := httptest.NewRequest("GET", "/", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Authorization", bearerPrefix+token)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusMethodNotAllowed {
@@ -91,7 +91,7 @@ func TestHTTPServerHardening(t *testing.T) {
 	// and succeed.
 	initMsg := []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}`)
 	req = httptest.NewRequest("POST", "/", bytes.NewReader(initMsg))
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Authorization", bearerPrefix+token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	rec = httptest.NewRecorder()
@@ -100,3 +100,5 @@ func TestHTTPServerHardening(t *testing.T) {
 		t.Errorf("POST initialize with valid bearer: status %d, want 200 (body: %s)", rec.Code, rec.Body.String())
 	}
 }
+
+const bearerPrefix = "Bearer "

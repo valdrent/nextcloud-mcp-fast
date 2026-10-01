@@ -23,7 +23,7 @@ func TestToRel(t *testing.T) {
 	}{
 		{"/remote.php/dav/files/alice/", "/", true},
 		{"/remote.php/dav/files/alice/docs", "/docs", true},
-		{"/remote.php/dav/files/alice/docs/notes.txt", "/docs/notes.txt", true},
+		{"/remote.php/dav/files/alice/docs/notes.txt", notesPath, true},
 		{"/remote.php/dav/files/bob/secret", "", false}, // other user rejected
 		{"/other/path", "", false},                      // wrong prefix
 	}
@@ -39,10 +39,10 @@ func TestToRel(t *testing.T) {
 
 func TestBaseName(t *testing.T) {
 	cases := map[string]string{
-		"/docs/notes.txt": "notes.txt",
-		"/docs/":          "docs",
-		"/file.md":        "file.md",
-		"/":               "",
+		notesPath:  "notes.txt",
+		"/docs/":   "docs",
+		"/file.md": "file.md",
+		"/":        "",
 	}
 	for in, want := range cases {
 		if got := baseName(in); got != want {
@@ -66,11 +66,11 @@ func TestNormalizeDir(t *testing.T) {
 }
 
 func TestURL(t *testing.T) {
-	c, err := NewClient(&Credentials{Host: "https://cloud.example.com", Username: "alice"}, &http.Client{})
+	c, err := NewClient(&Credentials{Host: cloudURL, Username: "alice"}, &http.Client{})
 	if err != nil {
-		t.Fatalf("NewClient: %v", err)
+		t.Fatalf(errNewClientFmt, err)
 	}
-	got := c.URL("/docs/notes.txt")
+	got := c.URL(notesPath)
 	want := "https://cloud.example.com/remote.php/dav/files/alice/docs/notes.txt"
 	if got != want {
 		t.Errorf("URL = %q, want %q", got, want)
@@ -78,19 +78,19 @@ func TestURL(t *testing.T) {
 }
 
 func TestCredentialsID(t *testing.T) {
-	c := &Credentials{Host: "https://cloud.example.com", Username: "alice"}
+	c := &Credentials{Host: cloudURL, Username: "alice"}
 	if got := c.ID(); got != "https://cloud.example.com|alice" {
 		t.Errorf("ID() = %q", got)
 	}
 }
 
 func TestURLEscapesSegments(t *testing.T) {
-	c, err := NewClient(&Credentials{Host: "https://cloud.example.com", Username: "ali ce"}, &http.Client{})
+	c, err := NewClient(&Credentials{Host: cloudURL, Username: "ali ce"}, &http.Client{})
 	if err != nil {
-		t.Fatalf("NewClient: %v", err)
+		t.Fatalf(errNewClientFmt, err)
 	}
 	cases := map[string]string{
-		"/docs/notes.txt":  "https://cloud.example.com/remote.php/dav/files/ali%20ce/docs/notes.txt",
+		notesPath:          "https://cloud.example.com/remote.php/dav/files/ali%20ce/docs/notes.txt",
 		"/a#b/c?d/e%f g":   "https://cloud.example.com/remote.php/dav/files/ali%20ce/a%23b/c%3Fd/e%25f%20g",
 		"/":                "https://cloud.example.com/remote.php/dav/files/ali%20ce",
 		"":                 "https://cloud.example.com/remote.php/dav/files/ali%20ce",
@@ -185,7 +185,7 @@ func TestPROPFINDResponseSizeCap(t *testing.T) {
 	}
 	c, err := NewClient(creds, &http.Client{})
 	if err != nil {
-		t.Fatalf("NewClient: %v", err)
+		t.Fatalf(errNewClientFmt, err)
 	}
 
 	// Call Stat which uses PROPFIND internally
@@ -199,3 +199,8 @@ func TestPROPFINDResponseSizeCap(t *testing.T) {
 		t.Errorf("error message should mention exceeding limit: %v", err)
 	}
 }
+
+const (
+	cloudURL  = "https://cloud.example.com"
+	notesPath = "/docs/notes.txt"
+)

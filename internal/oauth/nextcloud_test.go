@@ -49,12 +49,12 @@ func TestNextcloudVerifier(t *testing.T) {
 
 func TestAuthServerMetadata(t *testing.T) {
 	w := httptest.NewRecorder()
-	AuthServerMetadata("https://mcp.example.com", "https://cloud.example.com/").ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
+	AuthServerMetadata(testMCPOrigin, "https://cloud.example.com/").ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
 	var m map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &m); err != nil {
 		t.Fatal(err)
 	}
-	if m["issuer"] != "https://mcp.example.com" ||
+	if m["issuer"] != testMCPOrigin ||
 		m["authorization_endpoint"] != "https://cloud.example.com/index.php/apps/oauth2/authorize" ||
 		m["token_endpoint"] != "https://cloud.example.com/index.php/apps/oauth2/api/v1/token" {
 		t.Fatalf("unexpected metadata: %v", m)
@@ -62,7 +62,9 @@ func TestAuthServerMetadata(t *testing.T) {
 	if _, ok := m["registration_endpoint"]; ok {
 		t.Fatal("must not advertise DCR")
 	}
-	if Origin("https://mcp.example.com/mcp") != "https://mcp.example.com" {
+	if Origin("https://mcp.example.com/mcp") != testMCPOrigin {
 		t.Fatal("origin")
 	}
 }
+
+const testMCPOrigin = "https://mcp.example.com"

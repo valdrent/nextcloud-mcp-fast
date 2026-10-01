@@ -24,13 +24,13 @@ func withEnv(t *testing.T, kv map[string]string) {
 
 func TestLoadDefaults(t *testing.T) {
 	withEnv(t, map[string]string{
-		"NEXTCLOUD_HOST":     "https://cloud.example.com",
+		"NEXTCLOUD_HOST":     testCloudURL,
 		"NEXTCLOUD_USERNAME": "alice",
 		"NEXTCLOUD_PASSWORD": "pw",
 	})
 	cfg, err := Load()
 	if err != nil {
-		t.Fatalf("Load: %v", err)
+		t.Fatalf(errLoadFmt, err)
 	}
 	if cfg.Mode != "stdio" {
 		t.Errorf("Mode = %q, want stdio", cfg.Mode)
@@ -57,23 +57,23 @@ func TestLoadHostNormalization(t *testing.T) {
 	})
 	cfg, err := Load()
 	if err != nil {
-		t.Fatalf("Load: %v", err)
+		t.Fatalf(errLoadFmt, err)
 	}
-	if cfg.Host != "https://cloud.example.com" {
+	if cfg.Host != testCloudURL {
 		t.Errorf("Host = %q, want https://cloud.example.com", cfg.Host)
 	}
 }
 
 func TestLoadFullAlias(t *testing.T) {
 	withEnv(t, map[string]string{
-		"NEXTCLOUD_HOST":            "https://cloud.example.com",
+		"NEXTCLOUD_HOST":            testCloudURL,
 		"NEXTCLOUD_USERNAME":        "alice",
 		"NEXTCLOUD_PASSWORD":        "pw",
 		"NEXTCLOUD_MCP_PERMISSIONS": "full",
 	})
 	cfg, err := Load()
 	if err != nil {
-		t.Fatalf("Load: %v", err)
+		t.Fatalf(errLoadFmt, err)
 	}
 	if cfg.Permissions != PermDestructive {
 		t.Errorf("Permissions = %q, want destructive", cfg.Permissions)
@@ -86,23 +86,23 @@ func TestLoadValidationErrors(t *testing.T) {
 		env  map[string]string
 	}{
 		{"bad transport", map[string]string{
-			"NEXTCLOUD_HOST": "https://x", "NEXTCLOUD_USERNAME": "a", "NEXTCLOUD_PASSWORD": "b",
+			"NEXTCLOUD_HOST": testShortHost, "NEXTCLOUD_USERNAME": "a", "NEXTCLOUD_PASSWORD": "b",
 			"NEXTCLOUD_MCP_TRANSPORT": "carrier-pigeon",
 		}},
 		{"bad permission", map[string]string{
-			"NEXTCLOUD_HOST": "https://x", "NEXTCLOUD_USERNAME": "a", "NEXTCLOUD_PASSWORD": "b",
+			"NEXTCLOUD_HOST": testShortHost, "NEXTCLOUD_USERNAME": "a", "NEXTCLOUD_PASSWORD": "b",
 			"NEXTCLOUD_MCP_PERMISSIONS": "sudo",
 		}},
 		{"list entries too high", map[string]string{
-			"NEXTCLOUD_HOST": "https://x", "NEXTCLOUD_USERNAME": "a", "NEXTCLOUD_PASSWORD": "b",
+			"NEXTCLOUD_HOST": testShortHost, "NEXTCLOUD_USERNAME": "a", "NEXTCLOUD_PASSWORD": "b",
 			"NEXTCLOUD_MCP_MAX_LIST_ENTRIES": "9999",
 		}},
 		{"read bytes too low", map[string]string{
-			"NEXTCLOUD_HOST": "https://x", "NEXTCLOUD_USERNAME": "a", "NEXTCLOUD_PASSWORD": "b",
+			"NEXTCLOUD_HOST": testShortHost, "NEXTCLOUD_USERNAME": "a", "NEXTCLOUD_PASSWORD": "b",
 			"NEXTCLOUD_MCP_MAX_READ_BYTES": "10",
 		}},
 		{"missing password", map[string]string{
-			"NEXTCLOUD_HOST": "https://x", "NEXTCLOUD_USERNAME": "a",
+			"NEXTCLOUD_HOST": testShortHost, "NEXTCLOUD_USERNAME": "a",
 		}},
 	}
 	for _, tc := range cases {
@@ -117,14 +117,14 @@ func TestLoadValidationErrors(t *testing.T) {
 
 func TestLoadPassthroughRelaxesCreds(t *testing.T) {
 	withEnv(t, map[string]string{
-		"NEXTCLOUD_HOST":            "https://cloud.example.com",
+		"NEXTCLOUD_HOST":            testCloudURL,
 		"NEXTCLOUD_MCP_PASSTHROUGH": "true",
 		"NEXTCLOUD_MCP_TRANSPORT":   "http",
 		"NEXTCLOUD_MCP_HTTP_TOKEN":  strings.Repeat("t", 32),
 	})
 	cfg, err := Load()
 	if err != nil {
-		t.Fatalf("Load: %v", err)
+		t.Fatalf(errLoadFmt, err)
 	}
 	if !cfg.AllowPassthrough {
 		t.Errorf("AllowPassthrough = false, want true")
@@ -132,12 +132,12 @@ func TestLoadPassthroughRelaxesCreds(t *testing.T) {
 }
 
 func TestHostAllowed(t *testing.T) {
-	c := &Config{Host: "https://cloud.example.com", AllowedHosts: []string{"https://other.example.com", "http://plain.example.com"}}
+	c := &Config{Host: testCloudURL, AllowedHosts: []string{"https://other.example.com", "http://plain.example.com"}}
 	cases := []struct {
 		host string
 		want bool
 	}{
-		{"https://cloud.example.com", true},
+		{testCloudURL, true},
 		{"https://other.example.com", true},
 		{"https://evil.tld", false},
 		{"http://plain.example.com", false}, // plaintext entry, https default
@@ -162,7 +162,7 @@ func TestValidateTokenAndPassthrough(t *testing.T) {
 		mut     func(*Config)
 		wantErr bool
 	}{
-		{"ok", func(*Config) {}, false},
+		{"ok", noMutation, false},
 		{"short token", func(c *Config) { c.HTTPToken = strings.Repeat("x", 31) }, true},
 		{"empty token", func(c *Config) { c.HTTPToken = "" }, true},
 		{"passthrough stdio", func(c *Config) { c.Mode = "stdio"; c.AllowPassthrough = true }, true},
@@ -172,7 +172,7 @@ func TestValidateTokenAndPassthrough(t *testing.T) {
 		c := base()
 		tc.mut(c)
 		if err := c.validate(); (err != nil) != tc.wantErr {
-			t.Errorf("%s: err = %v, wantErr %v", tc.name, err, tc.wantErr)
+			t.Errorf(errWantFmt, tc.name, err, tc.wantErr)
 		}
 	}
 }
@@ -188,7 +188,7 @@ func TestValidateBreakerAndLogLevel(t *testing.T) {
 		mut     func(*Config)
 		wantErr bool
 	}{
-		{"ok", func(*Config) {}, false},
+		{"ok", noMutation, false},
 		{"disabled", func(c *Config) { c.CircuitBreakerThreshold = 0; c.CircuitBreakerWindow = 0 }, false},
 		{"negative threshold", func(c *Config) { c.CircuitBreakerThreshold = -1 }, true},
 		{"zero window enabled", func(c *Config) { c.CircuitBreakerWindow = 0 }, true},
@@ -199,7 +199,7 @@ func TestValidateBreakerAndLogLevel(t *testing.T) {
 		c := base()
 		tc.mut(c)
 		if err := c.validate(); (err != nil) != tc.wantErr {
-			t.Errorf("%s: err = %v, wantErr %v", tc.name, err, tc.wantErr)
+			t.Errorf(errWantFmt, tc.name, err, tc.wantErr)
 		}
 	}
 }
@@ -226,11 +226,11 @@ func TestLoadParseErrors(t *testing.T) {
 
 func TestLoadPlaintextWarning(t *testing.T) {
 	for host, wantWarn := range map[string]bool{
-		"http://cloud.example.com":  true,
-		"http://localhost:8080":     false,
-		"http://127.0.0.2":          false,
-		"http://[::1]:8080":         false,
-		"https://cloud.example.com": false,
+		"http://cloud.example.com": true,
+		"http://localhost:8080":    false,
+		"http://127.0.0.2":         false,
+		"http://[::1]:8080":        false,
+		testCloudURL:               false,
 	} {
 		var buf bytes.Buffer
 		log.SetOutput(&buf)
@@ -254,7 +254,7 @@ func TestValidateAuthModes(t *testing.T) {
 		mut     func(*Config)
 		wantErr bool
 	}{
-		"ok oidc, no static token needed": {func(*Config) {}, false},
+		"ok oidc, no static token needed": {noMutation, false},
 		"unknown mode":                    {func(c *Config) { c.AuthMode = "x" }, true},
 		"stdio rejected":                  {func(c *Config) { c.Mode = "stdio" }, true},
 		"http public url":                 {func(c *Config) { c.PublicURL = "http://mcp.example.com" }, true},
@@ -267,7 +267,18 @@ func TestValidateAuthModes(t *testing.T) {
 		c := base()
 		tc.mut(c)
 		if err := c.validate(); (err != nil) != tc.wantErr {
-			t.Errorf("%s: err = %v, wantErr %v", name, err, tc.wantErr)
+			t.Errorf(errWantFmt, name, err, tc.wantErr)
 		}
 	}
 }
+
+const errWantFmt = "%s: err = %v, wantErr %v"
+
+// noMutation leaves the baseline config untouched for the "ok" cases.
+func noMutation(*Config) { /* intentionally empty: the baseline must validate as-is */ }
+
+const (
+	testCloudURL  = "https://cloud.example.com"
+	errLoadFmt    = "Load: %v"
+	testShortHost = "https://x"
+)

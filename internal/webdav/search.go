@@ -137,9 +137,17 @@ func (e *propEntry) entry(rel string) Entry {
 			en.Modified = p.Body
 		case "getcontenttype":
 			en.ContentType = p.Body
+		default:
+			// Unknown properties are ignored.
 		}
 	}
 	return en
+}
+
+// bfsItem is a directory queued for the breadth-first fallback search.
+type bfsItem struct {
+	path  string
+	depth int
 }
 
 // searchBFS is the PROPFIND fallback: breadth-first, at most maxSearchDirs
@@ -147,11 +155,7 @@ func (e *propEntry) entry(rel string) Entry {
 func (c *Client) searchBFS(ctx context.Context, relDir, query string, maxDepth, limit int) (*ListResult, error) {
 	q := strings.ToLower(query)
 	out := &ListResult{}
-	type item struct {
-		path  string
-		depth int
-	}
-	queue := []item{{relDir, 0}}
+	queue := []bfsItem{{relDir, 0}}
 	visited := 0
 
 	for len(queue) > 0 && len(out.Entries) < limit && visited < maxSearchDirs {
@@ -159,31 +163,47 @@ func (c *Client) searchBFS(ctx context.Context, relDir, query string, maxDepth, 
 		queue = queue[1:]
 		visited++
 
-		offset := 0
-		for len(out.Entries) < limit {
-			res, err := c.List(ctx, cur.path, offset, 200)
-			if err != nil {
-				if ncerr.Is(err, ncerr.CodeNotFound) || ncerr.Is(err, ncerr.CodeForbidden) {
-					break
-				}
-				return nil, err
-			}
-			for _, e := range res.Entries {
-				if strings.Contains(strings.ToLower(e.Name), q) {
-					out.Entries = append(out.Entries, e)
-					if len(out.Entries) >= limit {
-						break
-					}
-				}
-				if e.IsDir && cur.depth < maxDepth-1 {
-					queue = append(queue, item{e.Path, cur.depth + 1})
-				}
-			}
-			if res.Next == "" {
-				break
-			}
-			offset += len(res.Entries)
+		var err error
+		queue, err = c.scanDir(ctx, cur, queue, q, maxDepth, limit, out)
+		if err != nil {
+			return nil, err
 		}
 	}
 	return out, nil
+}
+
+// scanDir pages through one directory, appending matches to out and
+// subdirectories (within maxDepth) to queue. Missing or forbidden folders are
+// skipped silently.
+func (c *Client) scanDir(ctx context.Context, cur bfsItem, queue []bfsItem, q string, maxDepth, limit int, out *ListResult) ([]bfsItem, error) {
+	offset := 0
+	for len(out.Entries) < limit {
+		res, err := c.List(ctx, cur.path, offset, 200)
+		if err != nil {
+			if ncerr.Is(err, ncerr.CodeNotFound) || ncerr.Is(err, ncerr.CodeForbidden) {
+				return queue, nil
+			}
+			return queue, err
+		}
+		queue = collectMatches(res.Entries, cur, queue, q, maxDepth, limit, out)
+		if res.Next == "" {
+			break
+		}
+		offset += len(res.Entries)
+	}
+	return queue, nil
+}
+
+// collectMatches appends name matches among entries to out (up to limit) and
+// queues subdirectories that are still within maxDepth.
+func collectMatches(entries []Entry, cur bfsItem, queue []bfsItem, q string, maxDepth, limit int, out *ListResult) []bfsItem {
+	for _, e := range entries {
+		if len(out.Entries) < limit && strings.Contains(strings.ToLower(e.Name), q) {
+			out.Entries = append(out.Entries, e)
+		}
+		if e.IsDir && cur.depth < maxDepth-1 {
+			queue = append(queue, bfsItem{e.Path, cur.depth + 1})
+		}
+	}
+	return queue
 }

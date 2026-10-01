@@ -53,20 +53,24 @@ func TestAllowMatrix(t *testing.T) {
 			if err != nil {
 				t.Fatalf("New(%q): %v", tc.level, err)
 			}
-			err = g.Allow(tc.op)
-			if tc.allow {
-				if err != nil {
-					t.Fatalf("Allow(%s) unexpected error: %v", opName(tc.op), err)
-				}
-				return
-			}
-			if err == nil {
-				t.Fatalf("Allow(%s) expected permission_denied, got nil", opName(tc.op))
-			}
-			if !ncerr.Is(err, ncerr.CodePermissionDenied) {
-				t.Fatalf("expected code %s, got: %v", ncerr.CodePermissionDenied, err)
-			}
+			checkAllow(t, g.Allow(tc.op), tc.allow, tc.op)
 		})
+	}
+}
+
+func checkAllow(t *testing.T, err error, allow bool, op Level) {
+	t.Helper()
+	switch {
+	case allow && err != nil:
+		t.Fatalf("Allow(%s) unexpected error: %v", opName(op), err)
+	case allow:
+		return
+	case err == nil:
+		t.Fatalf("Allow(%s) expected permission_denied, got nil", opName(op))
+	case !ncerr.Is(err, ncerr.CodePermissionDenied):
+		t.Fatalf("expected code %s, got: %v", ncerr.CodePermissionDenied, err)
+	default:
+		return
 	}
 }
 
