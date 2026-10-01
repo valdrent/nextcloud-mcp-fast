@@ -4,6 +4,7 @@
 package mcpsrv
 
 import (
+	"context"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/auth"
@@ -51,7 +52,7 @@ func TestOAuthUnmappedUserDenied(t *testing.T) {
 	if h, u, p := s.credsFor(oauthReq(), nil); h != "" || u != "" || p != "" {
 		t.Fatal("unmapped user must get empty credentials")
 	}
-	if _, err := s.resolveClient(nil, oauthReq(), nil); err == nil {
+	if _, err := s.resolveClient(context.TODO(), oauthReq(), nil); err == nil {
 		t.Fatal("expected forbidden for unmapped user")
 	}
 }

@@ -260,10 +260,18 @@ func (v *OIDCVerifier) refresh(ctx context.Context) error {
 			keys[k.Kid] = &rsa.PublicKey{N: n, E: int(e.Int64())}
 		case "EC":
 			x, y := b64Int(k.X), b64Int(k.Y)
-			if k.Crv != "P-256" || x == nil || y == nil || !elliptic.P256().IsOnCurve(x, y) {
+			if k.Crv != "P-256" || x == nil || y == nil || x.BitLen() > 256 || y.BitLen() > 256 {
 				continue
 			}
-			keys[k.Kid] = &ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}
+			point := make([]byte, 65)
+			point[0] = 0x04
+			x.FillBytes(point[1:33])
+			y.FillBytes(point[33:])
+			pub, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), point)
+			if err != nil {
+				continue
+			}
+			keys[k.Kid] = pub
 		}
 	}
 	if len(keys) == 0 {
