@@ -199,9 +199,9 @@ Notas:
   permiso `read`. Copilot code review solo usa herramientas de lectura en cualquier caso.
 - Usa una cuenta o App Password de Nextcloud dedicada para Copilot, para poder
   revocarla de forma independiente.
-- La configuración usa la imagen de contenedor publicada. Mientras no exista una
-  versión etiquetada, puedes usar `"command": "go"` con
-  `"args": ["run", "github.com/valdrent/nextcloud-mcp-fast@main"]`.
+- La configuración usa la imagen de contenedor publicada y firmada. Para
+  configuraciones reproducibles, fija un tag de release (p. ej. `:v1.0.0`) en
+  lugar de `:latest`.
 - Para verificarlo, abre los logs de una sesión de Copilot y expande **Start MCP Servers**.
 
 ## Herramientas

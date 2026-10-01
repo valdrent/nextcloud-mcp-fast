@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-01
+
 ### Added
 
 - **OAuth 2.0 resource-server mode** (`NEXTCLOUD_MCP_AUTH_MODE=oidc`) so Claude
